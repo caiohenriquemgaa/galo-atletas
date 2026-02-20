@@ -83,7 +83,7 @@ export default function AdminSyncPage() {
       toast({
         variant: "destructive",
         title: "Falha no sync",
-        description: payload.error ?? "Não foi possível executar o sync mock.",
+        description: payload.error ?? "Não foi possível executar o sync da FPF.",
       });
       setRunning(false);
       await loadRuns();
@@ -92,7 +92,7 @@ export default function AdminSyncPage() {
 
     toast({
       title: "Sync finalizado",
-      description: "Execução mock concluída com sucesso.",
+      description: "Execução concluída com sucesso.",
     });
 
     setRunning(false);
@@ -110,7 +110,7 @@ export default function AdminSyncPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Admin Sync</h1>
-          <p className="mt-1 text-sm text-[var(--muted)]">Execute e monitore sincronizações mock do sistema.</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">Execute e monitore sincronizações do sistema.</p>
         </div>
         <Button onClick={handleRunSync} disabled={running}>
           {running ? "Executando..." : "Rodar sync agora"}
