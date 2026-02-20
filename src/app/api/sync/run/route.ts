@@ -144,7 +144,7 @@ export async function POST() {
 
       matchesImported += 1;
 
-      const statsPayload = athleteRows.map((athlete) => ({
+      const rows = athleteRows.map((athlete) => ({
         match_id: match.id,
         athlete_id: athlete.id,
         minutes: generateMinutes(),
@@ -154,15 +154,15 @@ export async function POST() {
         red_cards: veryRareCard(),
       }));
 
-      const { error: upsertError } = await supabase
-        .from("match_player_stats")
-        .upsert(statsPayload, { onConflict: "match_id,athlete_id" });
+      const { error: upsertError } = await supabase.from("match_player_stats").upsert(rows, {
+        onConflict: "match_id,athlete_id",
+      });
 
       if (upsertError) {
         throw new Error(upsertError.message);
       }
 
-      statsRowsUpserted += statsPayload.length;
+      statsRowsUpserted += rows.length;
     }
 
     const summary = {
