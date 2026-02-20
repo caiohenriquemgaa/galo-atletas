@@ -115,11 +115,12 @@ export async function POST() {
     let galoRowsFound = 0;
 
     for (const competition of activeCompetitions) {
-      if (!competition.url_base) continue;
+      const competitionUrlBase = competition.url_base;
+      if (!competitionUrlBase) continue;
 
       competitionsChecked += 1;
 
-      const { matches, debug } = await fetchCompetitionMatchesWithDebug(competition.url_base);
+      const { matches, debug } = await fetchCompetitionMatchesWithDebug(competitionUrlBase);
 
       fetchedBytes += debug.fetched_bytes;
       anchorsFound += debug.anchors_found;
@@ -142,7 +143,7 @@ export async function POST() {
           goals_against: galoHome ? (match.goals_away ?? 0) : (match.goals_home ?? 0),
           source: "FPF",
           source_url: stableSourceUrl({
-            competitionUrlBase: competition.url_base,
+            competitionUrlBase,
             seasonYear: competition.season_year,
             matchDateIso,
             homeTeam: match.home_team,
