@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { RefreshCcw, Stethoscope, Trophy, Users, X, LayoutDashboard, CalendarDays } from "lucide-react";
+import { RefreshCcw, Stethoscope, Trophy, Users, X, LayoutDashboard, CalendarDays, BarChart3 } from "lucide-react";
 
 type SidebarProps = {
   mobileOpen: boolean;
@@ -12,6 +12,7 @@ type SidebarProps = {
 const links = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/athletes", label: "Atletas", icon: Users },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/matches", label: "Jogos", icon: CalendarDays },
   { href: "/competitions", label: "Competições", icon: Trophy },
   { href: "/medical", label: "Médico", icon: Stethoscope },
