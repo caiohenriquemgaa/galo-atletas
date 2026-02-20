@@ -1,14 +1,28 @@
-import type { ReactNode } from "react";
+import * as React from "react";
+import { cn } from "@/lib/utils";
 
-type CardProps = {
-  children: ReactNode;
-  className?: string;
-};
-
-export function Card({ children, className = "" }: CardProps) {
-  return (
-    <section className={`app-card rounded-xl border border-white/10 bg-[var(--card)] p-6 shadow-lg shadow-black/20 ${className}`}>
-      {children}
-    </section>
-  );
+function Card({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("rounded-xl border border-white/10 bg-[var(--card)] shadow-lg shadow-black/20", className)} {...props} />;
 }
+
+function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />;
+}
+
+function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("text-2xl font-semibold leading-none tracking-tight", className)} {...props} />;
+}
+
+function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("text-sm text-[var(--muted)]", className)} {...props} />;
+}
+
+function CardContent({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("p-6 pt-0", className)} {...props} />;
+}
+
+function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("flex items-center p-6 pt-0", className)} {...props} />;
+}
+
+export { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle };
