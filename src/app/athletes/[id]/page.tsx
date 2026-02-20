@@ -8,6 +8,7 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { supabase } from "@/lib/supabase/client";
+import { downloadCsv } from "@/lib/export/csv";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -68,8 +69,12 @@ const athleteSchema = z.object({
 
 type AthleteFormValues = z.infer<typeof athleteSchema>;
 
-function toDateLabel(value: string) {
+function toShortDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
+}
+
+function toLongDate(value: string) {
+  return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(value));
 }
 
 function toHomeAwayLabel(home: boolean) {
@@ -79,6 +84,15 @@ function toHomeAwayLabel(home: boolean) {
 function pickMatch(match: AthleteStatRow["match"]): MatchInfo | null {
   if (!match) return null;
   return Array.isArray(match) ? (match[0] ?? null) : match;
+}
+
+function sanitizeFilename(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
 }
 
 export default function AthleteProfilePage() {
@@ -95,6 +109,7 @@ export default function AthleteProfilePage() {
   const [error, setError] = useState<string | null>(null);
   const [athlete, setAthlete] = useState<Athlete | null>(null);
   const [statsRows, setStatsRows] = useState<AthleteStatRow[]>([]);
+  const [exporting, setExporting] = useState(false);
 
   const form = useForm<AthleteFormValues>({
     resolver: zodResolver(athleteSchema),
@@ -183,10 +198,91 @@ export default function AthleteProfilePage() {
     return [...normalizedRows]
       .sort((a, b) => new Date(a.match!.match_date).getTime() - new Date(b.match!.match_date).getTime())
       .map((row) => ({
-        label: toDateLabel(row.match!.match_date),
+        label: toShortDate(row.match!.match_date),
         minutes: row.minutes ?? 0,
       }));
   }, [normalizedRows]);
+
+  async function handleExportAthleteCsv() {
+    if (!athleteId || !athlete) return;
+
+    setExporting(true);
+
+    const { data: exportData, error: exportError } = await supabase
+      .from("match_player_stats")
+      .select(
+        "minutes,goals,assists,yellow_cards,red_cards, match:matches(match_date,opponent,home,goals_for,goals_against,competition_name,season_year,id)"
+      )
+      .eq("athlete_id", athleteId)
+      .limit(1000);
+
+    if (exportError) {
+      toast({
+        variant: "destructive",
+        title: "Erro na exportação",
+        description: "Não foi possível gerar o CSV do atleta.",
+      });
+      setExporting(false);
+      return;
+    }
+
+    const rows = ((exportData as AthleteStatRow[]) ?? [])
+      .map((row) => ({ ...row, match: pickMatch(row.match) }))
+      .filter((row) => row.match !== null)
+      .sort((a, b) => new Date(b.match!.match_date).getTime() - new Date(a.match!.match_date).getTime());
+
+    const totals = rows.reduce(
+      (acc, row) => ({
+        games: acc.games + 1,
+        minutes: acc.minutes + (row.minutes ?? 0),
+        goals: acc.goals + (row.goals ?? 0),
+        assists: acc.assists + (row.assists ?? 0),
+        yellow_cards: acc.yellow_cards + (row.yellow_cards ?? 0),
+        red_cards: acc.red_cards + (row.red_cards ?? 0),
+      }),
+      { games: 0, minutes: 0, goals: 0, assists: 0, yellow_cards: 0, red_cards: 0 }
+    );
+
+    const safeName = sanitizeFilename(athlete.name || "atleta");
+
+    const totalsCsvRows = [
+      {
+        name: athlete.name,
+        position: athlete.position ?? "",
+        games: totals.games,
+        minutes: totals.minutes,
+        goals: totals.goals,
+        assists: totals.assists,
+        yellow_cards: totals.yellow_cards,
+        red_cards: totals.red_cards,
+      },
+    ];
+
+    const gamesCsvRows = rows.map((row) => ({
+      date: toLongDate(row.match!.match_date),
+      competition_name: row.match!.competition_name,
+      season_year: row.match!.season_year,
+      opponent: row.match!.opponent,
+      home_away: toHomeAwayLabel(row.match!.home),
+      score: `${row.match!.goals_for} x ${row.match!.goals_against}`,
+      minutes: row.minutes ?? 0,
+      goals: row.goals ?? 0,
+      assists: row.assists ?? 0,
+      yellow_cards: row.yellow_cards ?? 0,
+      red_cards: row.red_cards ?? 0,
+      match_id: row.match!.id,
+    }));
+
+    downloadCsv(`atleta_totais_${safeName}.csv`, totalsCsvRows);
+    downloadCsv(`atleta_jogos_${safeName}.csv`, gamesCsvRows);
+
+    toast({
+      title: "CSV gerado",
+      description: "Arquivos do atleta baixados com sucesso.",
+    });
+
+    setExporting(false);
+  }
 
   async function handleSave(values: AthleteFormValues) {
     if (!athleteId) return;
@@ -285,9 +381,14 @@ export default function AthleteProfilePage() {
           </div>
         </div>
 
-        <Button asChild variant="outline">
-          <Link href="/athletes">Voltar</Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={handleExportAthleteCsv} disabled={exporting}>
+            {exporting ? "Exportando..." : "Exportar atleta (CSV)"}
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/athletes">Voltar</Link>
+          </Button>
+        </div>
       </div>
 
       <Tabs defaultValue="overview">
@@ -395,7 +496,7 @@ export default function AthleteProfilePage() {
                       <TableRow key={`${row.match!.id}-${index}`}>
                         <TableCell>
                           <Link href={`/matches/${row.match!.id}`} className="font-medium hover:text-[var(--gold)]">
-                            {toDateLabel(row.match!.match_date)}
+                            {toShortDate(row.match!.match_date)}
                           </Link>
                         </TableCell>
                         <TableCell>{row.match!.competition_name}</TableCell>
