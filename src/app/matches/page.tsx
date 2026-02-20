@@ -14,6 +14,7 @@ type MatchRow = {
   home: boolean;
   goals_for: number;
   goals_against: number;
+  source: "FPF" | "MOCK" | string;
 };
 
 function formatDate(date: string) {
@@ -26,38 +27,58 @@ export default function MatchesPage() {
   const [matches, setMatches] = useState<MatchRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  async function loadMatches() {
-    setLoading(true);
-    setError(null);
-
-    const { data, error: queryError } = await supabase
-      .from("matches")
-      .select("id,match_date,opponent,home,goals_for,goals_against")
-      .order("match_date", { ascending: false })
-      .limit(20);
-
-    if (queryError) {
-      setError("Não foi possível carregar os jogos.");
-      setMatches([]);
-    } else {
-      setMatches((data as MatchRow[]) ?? []);
-    }
-
-    setLoading(false);
-  }
+  const [sourceFilter, setSourceFilter] = useState<"ALL" | "FPF" | "MOCK">("ALL");
 
   useEffect(() => {
     Promise.resolve().then(() => {
-      void loadMatches();
+      void (async () => {
+        setLoading(true);
+        setError(null);
+
+        let query = supabase
+          .from("matches")
+          .select("id,match_date,opponent,home,goals_for,goals_against,source")
+          .order("match_date", { ascending: false })
+          .limit(20);
+
+        if (sourceFilter !== "ALL") {
+          query = query.eq("source", sourceFilter);
+        }
+
+        const { data, error: queryError } = await query;
+
+        if (queryError) {
+          setError("Não foi possível carregar os jogos.");
+          setMatches([]);
+        } else {
+          setMatches((data as MatchRow[]) ?? []);
+        }
+
+        setLoading(false);
+      })();
     });
-  }, []);
+  }, [sourceFilter]);
 
   return (
     <section className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Jogos</h1>
-        <p className="mt-1 text-sm text-[var(--muted)]">Últimos jogos importados no sistema.</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Jogos</h1>
+          <p className="mt-1 text-sm text-[var(--muted)]">Últimos jogos importados no sistema.</p>
+        </div>
+
+        <label className="space-y-1">
+          <span className="text-xs text-[var(--muted)]">Fonte</span>
+          <select
+            value={sourceFilter}
+            onChange={(event) => setSourceFilter(event.target.value as "ALL" | "FPF" | "MOCK")}
+            className="h-10 min-w-[180px] rounded-md border border-white/15 bg-black/25 px-3 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-[var(--gold)]"
+          >
+            <option value="ALL">Todas</option>
+            <option value="FPF">FPF</option>
+            <option value="MOCK">MOCK</option>
+          </select>
+        </label>
       </div>
 
       <Card>
@@ -80,6 +101,7 @@ export default function MatchesPage() {
                   <TableHead>Data</TableHead>
                   <TableHead>Adversário</TableHead>
                   <TableHead>Local</TableHead>
+                  <TableHead>Fonte</TableHead>
                   <TableHead className="text-right">Placar</TableHead>
                 </TableRow>
               </TableHeader>
@@ -94,6 +116,9 @@ export default function MatchesPage() {
                     <TableCell>{match.opponent}</TableCell>
                     <TableCell>
                       <Badge variant={match.home ? "default" : "outline"}>{match.home ? "Casa" : "Fora"}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={match.source === "FPF" ? "success" : "outline"}>{match.source ?? "-"}</Badge>
                     </TableCell>
                     <TableCell className="text-right">
                       {match.goals_for} x {match.goals_against}
