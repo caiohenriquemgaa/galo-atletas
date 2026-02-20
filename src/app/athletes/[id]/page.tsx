@@ -69,6 +69,11 @@ const athleteSchema = z.object({
 
 type AthleteFormValues = z.infer<typeof athleteSchema>;
 
+type ScoreClassification = {
+  label: "Baixo" | "Regular" | "Bom" | "Elite";
+  color: "red" | "yellow" | "green" | "blue";
+};
+
 function toShortDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
 }
@@ -93,6 +98,36 @@ function sanitizeFilename(value: string) {
     .replace(/[^a-zA-Z0-9_-]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .toLowerCase();
+}
+
+function calculatePerformanceScore({
+  totalMinutes,
+  totalGoals,
+  totalAssists,
+  totalYellow,
+  totalRed,
+}: {
+  totalMinutes: number;
+  totalGoals: number;
+  totalAssists: number;
+  totalYellow: number;
+  totalRed: number;
+}) {
+  const scoreBase =
+    totalMinutes / 90 +
+    totalGoals * 5 +
+    totalAssists * 3 -
+    totalYellow * 1 -
+    totalRed * 3;
+
+  return Math.max(0, Math.min(100, Math.round(scoreBase)));
+}
+
+function getScoreClassification(score: number): ScoreClassification {
+  if (score < 40) return { label: "Baixo", color: "red" };
+  if (score < 60) return { label: "Regular", color: "yellow" };
+  if (score < 80) return { label: "Bom", color: "green" };
+  return { label: "Elite", color: "blue" };
 }
 
 export default function AthleteProfilePage() {
@@ -202,6 +237,36 @@ export default function AthleteProfilePage() {
         minutes: row.minutes ?? 0,
       }));
   }, [normalizedRows]);
+
+  const performanceScore = useMemo(
+    () =>
+      calculatePerformanceScore({
+        totalMinutes: kpis.minutes,
+        totalGoals: kpis.goals,
+        totalAssists: kpis.assists,
+        totalYellow: kpis.yellow,
+        totalRed: kpis.red,
+      }),
+    [kpis]
+  );
+
+  const scoreClassification = useMemo(
+    () => getScoreClassification(performanceScore),
+    [performanceScore]
+  );
+
+  const scoreBadgeClass = useMemo(() => {
+    if (scoreClassification.color === "red") {
+      return "border-red-500/35 bg-red-500/15 text-red-300";
+    }
+    if (scoreClassification.color === "yellow") {
+      return "border-amber-500/35 bg-amber-500/15 text-amber-300";
+    }
+    if (scoreClassification.color === "green") {
+      return "border-emerald-500/35 bg-emerald-500/15 text-emerald-300";
+    }
+    return "border-sky-500/35 bg-sky-500/15 text-sky-300";
+  }, [scoreClassification.color]);
 
   async function handleExportAthleteCsv() {
     if (!athleteId || !athlete) return;
@@ -398,6 +463,27 @@ export default function AthleteProfilePage() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardDescription>Indicador consolidado dos últimos jogos</CardDescription>
+              <div className="flex flex-wrap items-center gap-3">
+                <CardTitle className="text-4xl">{performanceScore}</CardTitle>
+                <Badge className={scoreBadgeClass}>{scoreClassification.label}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="h-3 w-full overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-[var(--gold)] transition-all duration-700 ease-out"
+                  style={{ width: `${performanceScore}%` }}
+                />
+              </div>
+              <p className="mt-2 text-xs text-[var(--muted)]">
+                Score de 0 a 100 baseado em minutos, gols, assistências e cartões.
+              </p>
+            </CardContent>
+          </Card>
+
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             <Card>
               <CardHeader className="pb-2">
