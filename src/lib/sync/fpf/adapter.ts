@@ -18,6 +18,16 @@ export type FpfAdapterDebug = {
   galo_rows_found: number;
 };
 
+export type FpfMatchDetails = {
+  goals_home?: number;
+  goals_away?: number;
+  venue?: string;
+  kickoff_time?: string;
+  referee?: string;
+  home_team?: string;
+  away_team?: string;
+};
+
 type ParsedLine = {
   match_date: Date;
   home_team: string;
@@ -150,6 +160,77 @@ function dedupeMatches(matches: FpfNormalizedMatch[]) {
   }
 
   return Array.from(map.values());
+}
+
+function extractLabeledValue(pageText: string, labels: string[]) {
+  for (const label of labels) {
+    const regex = new RegExp(`${label}\s*:?\s*([^\n\r|]+)`, "i");
+    const match = pageText.match(regex);
+    if (match?.[1]) {
+      const value = match[1].replace(/\s+/g, " ").trim();
+      if (value) return value;
+    }
+  }
+  return undefined;
+}
+
+function parseMainScoreAndTeams(text: string) {
+  const score = parseScore(text);
+  const teams = parseTeams(text);
+
+  return {
+    goals_home: score.goalsHome ?? undefined,
+    goals_away: score.goalsAway ?? undefined,
+    home_team: teams?.homeTeam,
+    away_team: teams?.awayTeam,
+  };
+}
+
+export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDetails> {
+  try {
+    const response = await fetch(detailsUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; GaloAtletasSync/1.0)",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error(`Match details request failed (${response.status})`);
+    }
+
+    const html = await response.text();
+    const $ = load(html);
+
+    const mainBlocks = [
+      $("main").text(),
+      $("section").first().text(),
+      $(".placar, .score, .resultado, .jogo, .match").text(),
+      $("body").text(),
+    ]
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const parsed = parseMainScoreAndTeams(mainBlocks);
+
+    const venue = extractLabeledValue(mainBlocks, ["Estádio", "Estadio", "Local"]);
+    const kickoff_time = extractLabeledValue(mainBlocks, ["Horário", "Horario", "Hora"]);
+    const referee = extractLabeledValue(mainBlocks, ["Árbitro", "Arbitro", "Arbitragem"]);
+
+    return {
+      goals_home: parsed.goals_home,
+      goals_away: parsed.goals_away,
+      venue,
+      kickoff_time,
+      referee,
+      home_team: parsed.home_team,
+      away_team: parsed.away_team,
+    };
+  } catch {
+    return {};
+  }
 }
 
 export async function fetchCompetitionMatchesWithDebug(url_base: string) {

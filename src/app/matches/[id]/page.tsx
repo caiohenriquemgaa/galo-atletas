@@ -17,6 +17,11 @@ type Match = {
   home: boolean;
   goals_for: number;
   goals_against: number;
+  venue: string | null;
+  kickoff_time: string | null;
+  referee: string | null;
+  home_team: string | null;
+  away_team: string | null;
 };
 
 type Stat = {
@@ -62,7 +67,7 @@ export default function MatchDetailsPage() {
 
         const { data: matchData, error: matchError } = await supabase
           .from("matches")
-          .select("id,competition_name,match_date,opponent,home,goals_for,goals_against")
+          .select("id,competition_name,match_date,opponent,home,goals_for,goals_against,venue,kickoff_time,referee,home_team,away_team")
           .eq("id", matchId)
           .single<Match>();
 
@@ -146,6 +151,9 @@ export default function MatchDetailsPage() {
               <p className="text-lg font-semibold text-white">
                 Galo {match.goals_for} x {match.goals_against} {match.opponent}
               </p>
+              {match.venue && <p className="text-sm text-[var(--muted)]">Local: {match.venue}</p>}
+              {match.kickoff_time && <p className="text-sm text-[var(--muted)]">Horário: {match.kickoff_time}</p>}
+              {match.referee && <p className="text-sm text-[var(--muted)]">Árbitro: {match.referee}</p>}
             </div>
           )}
         </CardContent>

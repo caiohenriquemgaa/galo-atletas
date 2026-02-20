@@ -15,6 +15,7 @@ type MatchRow = {
   goals_for: number;
   goals_against: number;
   source: "FPF" | "MOCK" | string;
+  venue: string | null;
 };
 
 function formatDate(date: string) {
@@ -37,7 +38,7 @@ export default function MatchesPage() {
 
         let query = supabase
           .from("matches")
-          .select("id,match_date,opponent,home,goals_for,goals_against,source")
+          .select("id,match_date,opponent,home,goals_for,goals_against,source,venue")
           .order("match_date", { ascending: false })
           .limit(20);
 
@@ -113,7 +114,10 @@ export default function MatchesPage() {
                         {formatDate(match.match_date)}
                       </Link>
                     </TableCell>
-                    <TableCell>{match.opponent}</TableCell>
+                    <TableCell>
+                      <p>{match.opponent}</p>
+                      {match.venue && <p className="text-xs text-[var(--muted)]">{match.venue}</p>}
+                    </TableCell>
                     <TableCell>
                       <Badge variant={match.home ? "default" : "outline"}>{match.home ? "Casa" : "Fora"}</Badge>
                     </TableCell>
