@@ -24,6 +24,12 @@ type Athlete = {
   nickname: string | null;
   position: string | null;
   dob: string | null;
+  source: "FPF" | "MANUAL" | string | null;
+  cbf_registry: string | null;
+  habilitation_date: string | null;
+  club_name: string | null;
+  fpf_competition_id: string | null;
+  is_active_fpf: boolean | null;
 };
 
 type MatchInfo = {
@@ -79,6 +85,11 @@ function toShortDate(value: string) {
 }
 
 function toLongDate(value: string) {
+  return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(value));
+}
+
+function toShortDateOrDash(value: string | null) {
+  if (!value) return "-";
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(value));
 }
 
@@ -166,7 +177,7 @@ export default function AthleteProfilePage() {
 
         const { data: athleteData, error: athleteError } = await supabase
           .from("athletes")
-          .select("*")
+          .select("id,name,nickname,position,dob,source,cbf_registry,habilitation_date,club_name,fpf_competition_id,is_active_fpf")
           .eq("id", athleteId)
           .single<Athlete>();
 
@@ -440,9 +451,25 @@ export default function AthleteProfilePage() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{athlete.name}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {athlete.position && <Badge>{athlete.position}</Badge>}
+            <Badge>{athlete.position || "Sem posição"}</Badge>
             {athlete.nickname && <Badge variant="outline">{athlete.nickname}</Badge>}
+            {athlete.source === "FPF" && <Badge>FPF</Badge>}
+            {athlete.source === "FPF" && (
+              <Badge variant={athlete.is_active_fpf === false ? "destructive" : "success"}>
+                {athlete.is_active_fpf === false ? "Não habilitado" : "Habilitado"}
+              </Badge>
+            )}
             <Badge variant="success">Perfil do Atleta</Badge>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-6 text-sm text-[var(--muted)]">
+            <p>
+              <span className="mr-1 text-xs uppercase tracking-wide">Registro CBF</span>
+              <span className="text-white">{athlete.cbf_registry || "—"}</span>
+            </p>
+            <p>
+              <span className="mr-1 text-xs uppercase tracking-wide">Habilitado em</span>
+              <span className="text-white">{athlete.habilitation_date ? toShortDateOrDash(athlete.habilitation_date) : "—"}</span>
+            </p>
           </div>
         </div>
 
@@ -463,6 +490,39 @@ export default function AthleteProfilePage() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Dados cadastrais</CardTitle>
+              <CardDescription>Informações de origem e habilitação do atleta.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <p className="text-xs text-[var(--muted)]">Registro CBF</p>
+                  <p className="text-sm font-medium">{athlete.cbf_registry || "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--muted)]">Data habilitação</p>
+                  <p className="text-sm font-medium">{toShortDateOrDash(athlete.habilitation_date)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--muted)]">Fonte</p>
+                  <p className="text-sm font-medium">{athlete.source || "MANUAL"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--muted)]">Status habilitado</p>
+                  <p className="text-sm font-medium">
+                    {athlete.source === "FPF"
+                      ? athlete.is_active_fpf === false
+                        ? "Não habilitado"
+                        : "Habilitado"
+                      : "Não se aplica"}
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader className="pb-3">
               <CardDescription>Indicador consolidado dos últimos jogos</CardDescription>

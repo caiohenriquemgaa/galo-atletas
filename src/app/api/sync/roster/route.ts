@@ -26,6 +26,8 @@ type AthleteImportRow = {
   habilitation_date?: string;
   club_name: string;
   fpf_competition_id: string | null;
+  is_active_fpf: boolean;
+  last_seen_at: string;
 };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -76,6 +78,16 @@ export async function POST() {
     let rowsTotal = 0;
     let galoRows = 0;
 
+    const { error: prePassError } = await supabase
+      .from("athletes")
+      .update({ is_active_fpf: false })
+      .eq("source", "FPF")
+      .eq("club_name", "GALO MARINGA");
+
+    if (prePassError) {
+      throw new Error(prePassError.message);
+    }
+
     for (const competition of activeCompetitions) {
       if (!competition.url_base) continue;
       compsChecked += 1;
@@ -88,6 +100,7 @@ export async function POST() {
       if (athletes.length === 0) continue;
 
       const competitionId = extractCompetitionId(competition.url_base);
+      const nowIso = new Date().toISOString();
 
       const importRows: AthleteImportRow[] = athletes.map((athlete) => ({
         source: "FPF",
@@ -97,6 +110,8 @@ export async function POST() {
         habilitation_date: athlete.habilitation_date || undefined,
         club_name: "GALO MARINGA",
         fpf_competition_id: competitionId,
+        is_active_fpf: true,
+        last_seen_at: nowIso,
       }));
 
       const cbfKeys = importRows.map((row) => row.cbf_registry);

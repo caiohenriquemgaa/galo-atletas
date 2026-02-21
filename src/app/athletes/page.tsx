@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { downloadCsv } from "@/lib/export/csv";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
@@ -13,8 +14,11 @@ type Athlete = {
   name: string;
   nickname: string | null;
   position: string | null;
+  cbf_registry: string | null;
   dob: string | null;
   created_at: string;
+  source: "FPF" | "MANUAL" | string | null;
+  is_active_fpf: boolean | null;
 };
 
 type MatchMeta = {
@@ -60,7 +64,7 @@ export default function AthletesPage() {
 
     const { data, error: queryError } = await supabase
       .from("athletes")
-      .select("id,name,nickname,position,dob,created_at")
+      .select("id,name,nickname,position,cbf_registry,dob,created_at,source,is_active_fpf")
       .order("created_at", { ascending: false });
 
     if (queryError) {
@@ -290,6 +294,17 @@ export default function AthletesPage() {
                           {athlete.position || "Sem posição"}
                           {athlete.nickname ? ` • ${athlete.nickname}` : ""}
                         </p>
+                        {athlete.cbf_registry && (
+                          <p className="text-xs text-[var(--muted)]">Registro CBF: {athlete.cbf_registry}</p>
+                        )}
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Badge variant={athlete.source === "FPF" ? "default" : "outline"}>
+                            {athlete.source === "FPF" ? "FPF" : "MANUAL"}
+                          </Badge>
+                          {athlete.source === "FPF" && athlete.is_active_fpf === false && (
+                            <Badge variant="destructive">INATIVO</Badge>
+                          )}
+                        </div>
                       </div>
                       <span className="text-xs text-[var(--muted)]">Perfil</span>
                     </div>
