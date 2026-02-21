@@ -199,8 +199,7 @@ export async function POST() {
         };
       });
 
-      const importRows: MatchImportRow[] = detailedMatches
-        .map((item) => {
+      const importRows = detailedMatches.flatMap((item): MatchImportRow[] => {
           const details = item.details;
 
           const resolvedHomeTeam = (details?.home_team ?? item.home_team).replace(/\s+/g, " ").trim();
@@ -220,10 +219,10 @@ export async function POST() {
             opponentNormalized.includes("COOKIES") ||
             opponentNormalized.includes("FEDERACAO PARANAENSE")
           ) {
-            return null;
+            return [];
           }
 
-          return {
+          return [{
             competition_name: competition.name,
             season_year: competition.season_year,
             match_date: matchDateIso,
@@ -231,7 +230,7 @@ export async function POST() {
             home: galoHome,
             goals_for: galoHome ? (goalsHome ?? 0) : (goalsAway ?? 0),
             goals_against: galoHome ? (goalsAway ?? 0) : (goalsHome ?? 0),
-            source: "FPF",
+            source: "FPF" as const,
             source_url: stableSourceUrl({
               competitionUrlBase,
               seasonYear: competition.season_year,
@@ -245,9 +244,8 @@ export async function POST() {
             referee: details?.referee ?? null,
             home_team: resolvedHomeTeam,
             away_team: resolvedAwayTeam,
-          };
-        })
-        .filter((row): row is MatchImportRow => row !== null);
+          }];
+        });
 
       const stateHash = hashPayload(
         importRows
