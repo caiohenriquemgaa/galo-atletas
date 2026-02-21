@@ -31,8 +31,8 @@ type MatchImportRow = {
   match_date: string;
   opponent: string;
   home: boolean;
-  goals_for: number;
-  goals_against: number;
+  goals_for: number | null;
+  goals_against: number | null;
   source: "FPF";
   source_url: string;
   venue: string | null;
@@ -206,8 +206,8 @@ export async function POST() {
           const resolvedAwayTeam = (details?.away_team ?? item.away_team).replace(/\s+/g, " ").trim();
           const galoHome = isGaloMaringa(resolvedHomeTeam);
 
-          const goalsHome = details?.goals_home ?? item.goals_home;
-          const goalsAway = details?.goals_away ?? item.goals_away;
+          const goalsHome: number | null = details?.goals_home ?? item.goals_home ?? null;
+          const goalsAway: number | null = details?.goals_away ?? item.goals_away ?? null;
 
           const matchDateIso = item.match_date.toISOString().slice(0, 10);
           const opponent = (galoHome ? resolvedAwayTeam : resolvedHomeTeam).replace(/\s+/g, " ").trim();
@@ -228,8 +228,8 @@ export async function POST() {
             match_date: matchDateIso,
             opponent,
             home: galoHome,
-            goals_for: galoHome ? (goalsHome ?? 0) : (goalsAway ?? 0),
-            goals_against: galoHome ? (goalsAway ?? 0) : (goalsHome ?? 0),
+            goals_for: galoHome ? goalsHome : goalsAway,
+            goals_against: galoHome ? goalsAway : goalsHome,
             source: "FPF" as const,
             source_url: stableSourceUrl({
               competitionUrlBase,

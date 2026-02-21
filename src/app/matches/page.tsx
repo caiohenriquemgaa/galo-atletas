@@ -12,8 +12,8 @@ type MatchRow = {
   match_date: string;
   opponent: string;
   home: boolean;
-  goals_for: number;
-  goals_against: number;
+  goals_for: number | null;
+  goals_against: number | null;
   source: "FPF" | "MOCK" | string;
   venue: string | null;
 };
@@ -125,7 +125,9 @@ export default function MatchesPage() {
                       <Badge variant={match.source === "FPF" ? "success" : "outline"}>{match.source ?? "-"}</Badge>
                     </TableCell>
                     <TableCell className="text-right">
-                      {match.goals_for} x {match.goals_against}
+                      {match.goals_for === null || match.goals_against === null
+                        ? "— x —"
+                        : `${match.goals_for} x ${match.goals_against}`}
                     </TableCell>
                   </TableRow>
                 ))}

@@ -15,8 +15,8 @@ type Match = {
   match_date: string;
   opponent: string;
   home: boolean;
-  goals_for: number;
-  goals_against: number;
+  goals_for: number | null;
+  goals_against: number | null;
   venue: string | null;
   kickoff_time: string | null;
   referee: string | null;
@@ -148,9 +148,13 @@ export default function MatchDetailsPage() {
                 <Badge variant={match.home ? "default" : "outline"}>{match.home ? "Casa" : "Fora"}</Badge>
               </div>
               <p className="text-sm text-[var(--muted)]">{formatDate(match.match_date)}</p>
-              <p className="text-lg font-semibold text-white">
-                Galo {match.goals_for} x {match.goals_against} {match.opponent}
-              </p>
+              {match.goals_for === null || match.goals_against === null ? (
+                <p className="text-sm text-[var(--muted)]">Partida ainda não realizada.</p>
+              ) : (
+                <p className="text-lg font-semibold text-white">
+                  Galo {match.goals_for} x {match.goals_against} {match.opponent}
+                </p>
+              )}
               {match.venue && <p className="text-sm text-[var(--muted)]">Local: {match.venue}</p>}
               {match.kickoff_time && <p className="text-sm text-[var(--muted)]">Horário: {match.kickoff_time}</p>}
               {match.referee && <p className="text-sm text-[var(--muted)]">Árbitro: {match.referee}</p>}
