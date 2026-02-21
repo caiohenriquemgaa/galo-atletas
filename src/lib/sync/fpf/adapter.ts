@@ -32,6 +32,10 @@ export type FpfMatchDetails = {
   away_team?: string;
 };
 
+const SCORE_EXACT_REGEX = /^\s*\d{1,2}\s*[x×]\s*\d{1,2}\s*$/;
+const SCORE_CAPTURE_REGEX = /(\d{1,2})\s*[x×]\s*(\d{1,2})/;
+const BANNED_TEAM_WORDS = ["federacao", "cookies", "diretoria", "menu", "politica"];
+
 type ParsedLine = {
   match_date: Date;
   home_team: string;
@@ -175,28 +179,54 @@ function dedupeMatches(matches: FpfNormalizedMatch[]) {
   return Array.from(map.values());
 }
 
-function extractLabeledValue(pageText: string, labels: string[]) {
-  for (const label of labels) {
-    const regex = new RegExp(`${label}\s*:?\s*([^\n\r|]+)`, "i");
-    const match = pageText.match(regex);
-    if (match?.[1]) {
-      const value = match[1].replace(/\s+/g, " ").trim();
-      if (value) return value;
-    }
-  }
-  return undefined;
+function sanitizeText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
 }
 
-function parseMainScoreAndTeams(text: string) {
-  const score = parseScore(text);
-  const teams = parseTeams(text);
+function hasBannedTeamWord(value: string) {
+  const normalized = normalizeText(value).toLowerCase();
+  return BANNED_TEAM_WORDS.some((word) => normalized.includes(word));
+}
 
-  return {
-    goals_home: score.goalsHome ?? undefined,
-    goals_away: score.goalsAway ?? undefined,
-    home_team: teams?.homeTeam,
-    away_team: teams?.awayTeam,
-  };
+function isValidTeamCandidate(value: string) {
+  if (!value) return false;
+  if (value.length >= 60) return false;
+  if (hasBannedTeamWord(value)) return false;
+  if (SCORE_EXACT_REGEX.test(value)) return false;
+  if (!/[A-Za-zÀ-ÿ]/.test(value)) return false;
+  return true;
+}
+
+function pushUniqueShortText(target: string[], raw: string, maxLength = 50) {
+  const text = sanitizeText(raw);
+  if (!text || text.length > maxLength) return;
+  if (target.includes(text)) return;
+  target.push(text);
+}
+
+function extractLabeledSibling(
+  $: ReturnType<typeof load>,
+  root: ReturnType<ReturnType<typeof load>>,
+  labels: string[]
+) {
+  const nodes = root
+    .find("label,strong,b,span,p,dt,th,td")
+    .toArray();
+
+  for (const node of nodes) {
+    const labelText = sanitizeText($(node).text());
+    if (!labelText) continue;
+
+    const matchesLabel = labels.some((label) =>
+      normalizeText(labelText).includes(normalizeText(label))
+    );
+    if (!matchesLabel) continue;
+
+    const siblingText = sanitizeText($(node).next().text());
+    if (siblingText && siblingText.length <= 100) return siblingText;
+  }
+
+  return undefined;
 }
 
 function pickRowFromLink($: ReturnType<typeof load>, link: AnyNode) {
@@ -238,32 +268,64 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
 
     const html = await response.text();
     const $ = load(html);
+    const scoreElements = $("section,div,span,p,strong,h1,h2,h3,h4,h5,h6,td")
+      .filter((_, el) => SCORE_EXACT_REGEX.test(sanitizeText($(el).text())))
+      .toArray();
 
-    const mainBlocks = [
-      $(".placar, .score, .resultado, .jogo, .match, .match-details, .game-details").first().text(),
-      $("main .container, main section, article, section").first().text(),
-      $("h1, h2").first().text(),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
+    for (const scoreEl of scoreElements) {
+      const scoreText = sanitizeText($(scoreEl).text());
+      const scoreMatch = scoreText.match(SCORE_CAPTURE_REGEX);
+      if (!scoreMatch) continue;
 
-    const parsed = parseMainScoreAndTeams(mainBlocks);
+      const scoreBlock = $(scoreEl).closest("section, div");
+      if (!scoreBlock.length) continue;
 
-    const venue = extractLabeledValue(mainBlocks, ["Estádio", "Estadio", "Local"]);
-    const kickoff_time = extractLabeledValue(mainBlocks, ["Horário", "Horario", "Hora"]);
-    const referee = extractLabeledValue(mainBlocks, ["Árbitro", "Arbitro", "Arbitragem"]);
+      const candidates: string[] = [];
 
-    return {
-      goals_home: parsed.goals_home,
-      goals_away: parsed.goals_away,
-      venue,
-      kickoff_time,
-      referee,
-      home_team: parsed.home_team,
-      away_team: parsed.away_team,
-    };
+      $(scoreEl)
+        .parent()
+        .children()
+        .each((_, node) => {
+          pushUniqueShortText(candidates, $(node).text(), 50);
+        });
+
+      scoreBlock
+        .find("h1,h2,h3,h4,h5,h6,p,span,strong,a,td")
+        .each((_, node) => {
+          pushUniqueShortText(candidates, $(node).text(), 50);
+        });
+
+      const teamCandidates = candidates.filter(isValidTeamCandidate).slice(0, 6);
+      if (teamCandidates.length < 2) continue;
+
+      const homeTeam = sanitizeText(teamCandidates[0]);
+      const awayTeam = sanitizeText(teamCandidates[1]);
+
+      if (!isValidTeamCandidate(homeTeam) || !isValidTeamCandidate(awayTeam)) continue;
+      if (homeTeam.length > 100 || awayTeam.length > 100) continue;
+
+      const blockText = sanitizeText(scoreBlock.text());
+      const kickoffTimeMatch = blockText.match(/\b\d{2}:\d{2}\b/);
+
+      const venue =
+        extractLabeledSibling($, scoreBlock, ["Estádio", "Estadio", "Local"])?.slice(0, 100) ??
+        undefined;
+      const referee =
+        extractLabeledSibling($, scoreBlock, ["Árbitro", "Arbitro", "Arbitragem"])?.slice(0, 100) ??
+        undefined;
+
+      return {
+        goals_home: Number.parseInt(scoreMatch[1], 10),
+        goals_away: Number.parseInt(scoreMatch[2], 10),
+        venue,
+        kickoff_time: kickoffTimeMatch?.[0],
+        referee,
+        home_team: homeTeam,
+        away_team: awayTeam,
+      };
+    }
+
+    return {};
   } catch {
     return {};
   }
