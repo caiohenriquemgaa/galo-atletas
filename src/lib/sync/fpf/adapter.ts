@@ -1,4 +1,5 @@
 import { load } from "cheerio";
+import type { AnyNode } from "domhandler";
 
 export type FpfNormalizedMatch = {
   competition_name: string;
@@ -198,7 +199,7 @@ function parseMainScoreAndTeams(text: string) {
   };
 }
 
-function pickRowFromLink($: ReturnType<typeof load>, link: Parameters<ReturnType<typeof load>["$"]>[0]) {
+function pickRowFromLink($: ReturnType<typeof load>, link: AnyNode) {
   const byTr = $(link).closest("tr");
   if (byTr.length > 0) return byTr;
 
