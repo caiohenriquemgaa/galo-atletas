@@ -10,9 +10,16 @@ import { useToast } from "@/components/ui/use-toast";
 type SyncSummary = {
   source?: string;
   competitions_checked?: number;
+  comps_checked?: number;
   matches_found?: number;
   matches_imported?: number;
   players_linked?: number;
+  athletes_found?: number;
+  athletes_imported?: number;
+  athletes_updated?: number;
+  rows_total?: number;
+  rows_discarded?: number;
+  galo_rows?: number;
 };
 
 type SyncRun = {
@@ -43,6 +50,10 @@ function formatDate(value: string | null) {
 function renderSummary(summary: SyncSummary | null) {
   if (!summary) return "Sem resumo.";
 
+  if (summary.source === "FPF_ROSTER") {
+    return `source=FPF_ROSTER | comps=${summary.comps_checked ?? 0} | athletes_found=${summary.athletes_found ?? 0} | imported=${summary.athletes_imported ?? 0} | updated=${summary.athletes_updated ?? 0} | rows=${summary.rows_total ?? 0} | discarded=${summary.rows_discarded ?? 0} | galo_rows=${summary.galo_rows ?? 0}`;
+  }
+
   return `source=${summary.source ?? "-"} | comps=${summary.competitions_checked ?? 0} | found=${summary.matches_found ?? 0} | imported=${summary.matches_imported ?? 0} | linked=${summary.players_linked ?? 0}`;
 }
 
@@ -50,7 +61,8 @@ export default function AdminSyncPage() {
   const { toast } = useToast();
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
+  const [runningMatches, setRunningMatches] = useState(false);
+  const [runningRoster, setRunningRoster] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function loadRuns() {
@@ -74,7 +86,7 @@ export default function AdminSyncPage() {
   }
 
   async function handleRunSync() {
-    setRunning(true);
+    setRunningMatches(true);
 
     const response = await fetch("/api/sync/run", { method: "POST" });
     const payload = (await response.json()) as { error?: string };
@@ -85,7 +97,7 @@ export default function AdminSyncPage() {
         title: "Falha no sync",
         description: payload.error ?? "Não foi possível executar o sync da FPF.",
       });
-      setRunning(false);
+      setRunningMatches(false);
       await loadRuns();
       return;
     }
@@ -95,7 +107,33 @@ export default function AdminSyncPage() {
       description: "Execução concluída com sucesso.",
     });
 
-    setRunning(false);
+    setRunningMatches(false);
+    await loadRuns();
+  }
+
+  async function handleRunRosterSync() {
+    setRunningRoster(true);
+
+    const response = await fetch("/api/sync/roster", { method: "POST" });
+    const payload = (await response.json()) as { error?: string };
+
+    if (!response.ok) {
+      toast({
+        variant: "destructive",
+        title: "Falha no sync de elenco",
+        description: payload.error ?? "Não foi possível executar o sync de atletas habilitados.",
+      });
+      setRunningRoster(false);
+      await loadRuns();
+      return;
+    }
+
+    toast({
+      title: "Sync de elenco finalizado",
+      description: "Execução concluída com sucesso.",
+    });
+
+    setRunningRoster(false);
     await loadRuns();
   }
 
@@ -112,9 +150,14 @@ export default function AdminSyncPage() {
           <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Admin Sync</h1>
           <p className="mt-1 text-sm text-[var(--muted)]">Execute e monitore sincronizações do sistema.</p>
         </div>
-        <Button onClick={handleRunSync} disabled={running}>
-          {running ? "Executando..." : "Rodar sync agora"}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={handleRunSync} disabled={runningMatches || runningRoster}>
+            {runningMatches ? "Executando..." : "Rodar sync agora"}
+          </Button>
+          <Button variant="outline" onClick={handleRunRosterSync} disabled={runningMatches || runningRoster}>
+            {runningRoster ? "Sincronizando elenco..." : "Sync elenco FPF"}
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -137,6 +180,7 @@ export default function AdminSyncPage() {
                 <div key={run.id} className="rounded-lg border border-white/10 bg-black/20 p-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+                    <Badge variant="outline">{run.summary_json?.source ?? "-"}</Badge>
                     <span className="text-xs text-[var(--muted)]">Início: {formatDate(run.started_at)}</span>
                     <span className="text-xs text-[var(--muted)]">Fim: {formatDate(run.finished_at)}</span>
                   </div>
