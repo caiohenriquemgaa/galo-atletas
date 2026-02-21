@@ -20,6 +20,8 @@ type SyncSummary = {
   rows_total?: number;
   rows_discarded?: number;
   galo_rows?: number;
+  imported?: number;
+  updated?: number;
 };
 
 type SyncRun = {
@@ -51,7 +53,7 @@ function renderSummary(summary: SyncSummary | null) {
   if (!summary) return "Sem resumo.";
 
   if (summary.source === "FPF_ROSTER") {
-    return `source=FPF_ROSTER | comps=${summary.comps_checked ?? 0} | athletes_found=${summary.athletes_found ?? 0} | imported=${summary.athletes_imported ?? 0} | updated=${summary.athletes_updated ?? 0} | rows=${summary.rows_total ?? 0} | discarded=${summary.rows_discarded ?? 0} | galo_rows=${summary.galo_rows ?? 0}`;
+    return `source=FPF_ROSTER | comps=${summary.comps_checked ?? 0} | imported=${summary.imported ?? summary.athletes_imported ?? 0} | updated=${summary.updated ?? summary.athletes_updated ?? 0} | rows=${summary.rows_total ?? 0} | galo_rows=${summary.galo_rows ?? 0}`;
   }
 
   return `source=${summary.source ?? "-"} | comps=${summary.competitions_checked ?? 0} | found=${summary.matches_found ?? 0} | imported=${summary.matches_imported ?? 0} | linked=${summary.players_linked ?? 0}`;

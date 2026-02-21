@@ -22,8 +22,8 @@ type AthleteImportRow = {
   source: "FPF";
   cbf_registry: string;
   name: string;
-  birth_date?: string;
-  position?: string;
+  nickname: string;
+  habilitation_date?: string;
   club_name: string;
   fpf_competition_id: string | null;
 };
@@ -71,11 +71,9 @@ export async function POST() {
     const activeCompetitions = (competitions as CompetitionRow[]) ?? [];
 
     let compsChecked = 0;
-    let athletesFound = 0;
-    let athletesImported = 0;
-    let athletesUpdated = 0;
+    let imported = 0;
+    let updated = 0;
     let rowsTotal = 0;
-    let rowsDiscarded = 0;
     let galoRows = 0;
 
     for (const competition of activeCompetitions) {
@@ -85,9 +83,7 @@ export async function POST() {
       const { athletes, debug } = await fetchEligibleAthletesWithDebug(competition.url_base);
 
       rowsTotal += debug.rows_total;
-      rowsDiscarded += debug.rows_discarded;
       galoRows += debug.galo_rows;
-      athletesFound += athletes.length;
 
       if (athletes.length === 0) continue;
 
@@ -97,8 +93,8 @@ export async function POST() {
         source: "FPF",
         cbf_registry: athlete.cbf_registry,
         name: athlete.name,
-        birth_date: athlete.birth_date,
-        position: athlete.position,
+        nickname: athlete.nickname,
+        habilitation_date: athlete.habilitation_date || undefined,
         club_name: "GALO MARINGA",
         fpf_competition_id: competitionId,
       }));
@@ -125,19 +121,17 @@ export async function POST() {
         throw new Error(upsertError.message);
       }
 
-      athletesUpdated += existingSet.size;
-      athletesImported += importRows.length - existingSet.size;
+      updated += existingSet.size;
+      imported += importRows.length - existingSet.size;
     }
 
     const summary = {
       source: "FPF_ROSTER",
       comps_checked: compsChecked,
-      athletes_found: athletesFound,
-      athletes_imported: athletesImported,
-      athletes_updated: athletesUpdated,
       rows_total: rowsTotal,
-      rows_discarded: rowsDiscarded,
       galo_rows: galoRows,
+      imported,
+      updated,
     };
 
     const { data: doneRun, error: doneError } = await supabase
@@ -174,4 +168,3 @@ export async function POST() {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-

@@ -3,14 +3,13 @@ import { load } from "cheerio";
 export type FpfRosterAthlete = {
   cbf_registry: string;
   name: string;
-  birth_date?: string;
-  position?: string;
+  nickname: string;
+  habilitation_date: string;
   club_name: string;
 };
 
 export type FpfRosterDebug = {
   rows_total: number;
-  rows_discarded: number;
   galo_rows: number;
 };
 
@@ -32,76 +31,38 @@ function normalizeClubForFilter(value: string) {
   return normalized.includes("GALO") && normalized.includes("MARINGA");
 }
 
-function parseBirthDate(value: string) {
+function parseDate(value: string) {
   const text = sanitizeText(value);
   const match = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!match) return undefined;
+  if (!match) return "";
 
   const [, dd, mm, yyyy] = match;
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function looksLikeHeader(values: string[]) {
-  const line = normalizeText(values.join(" "));
-  return (
-    line.includes("NOME") ||
-    line.includes("ATLETA") ||
-    line.includes("REGISTRO") ||
-    line.includes("POSICAO") ||
-    line.includes("CLUBE")
-  );
+function findGaloRosterTable($: ReturnType<typeof load>) {
+  const headings = $("h1, h2, h3").toArray();
+  for (const heading of headings) {
+    const title = sanitizeText($(heading).text());
+    if (!normalizeClubForFilter(title)) continue;
+
+    const nextTable = $(heading).nextAll("table").first();
+    if (nextTable.length > 0) return nextTable;
+
+    const parentTable = $(heading).parent().nextAll("table").first();
+    if (parentTable.length > 0) return parentTable;
+  }
+  return null;
 }
 
-function parseRowByHeader(headers: string[], values: string[]) {
-  let cbf_registry = "";
-  let name = "";
-  let birthDate: string | undefined;
-  let position: string | undefined;
-  let clubName = "";
-
-  headers.forEach((header, index) => {
-    const value = sanitizeText(values[index] ?? "");
-    const key = normalizeText(header);
-
-    if (key.includes("REGISTRO") || key.includes("CBF")) cbf_registry = value;
-    else if (key.includes("NOME") || key.includes("ATLETA")) name = value;
-    else if (key.includes("NASC")) birthDate = parseBirthDate(value);
-    else if (key.includes("POSICAO") || key.includes("POSI")) position = value;
-    else if (key.includes("CLUBE") || key.includes("EQUIPE") || key.includes("TIME")) clubName = value;
-  });
-
-  return {
-    cbf_registry: sanitizeText(cbf_registry),
-    name: sanitizeText(name),
-    birth_date: birthDate,
-    position: position ? sanitizeText(position) : undefined,
-    club_name: sanitizeText(clubName),
-  };
+function cleanCbfRegistry(value: string) {
+  const onlyDigits = sanitizeText(value).replace(/\D/g, "");
+  return /^\d+$/.test(onlyDigits) ? onlyDigits : "";
 }
 
-function parseRowByGuess(values: string[]) {
-  const sanitized = values.map((value) => sanitizeText(value));
-
-  const cbf_registry = sanitized.find((value) => /\d{4,}/.test(value)) ?? "";
-  const name = sanitized.find((value) => /[A-Za-zÀ-ÿ]/.test(value) && !/\d{2}\/\d{2}\/\d{4}/.test(value)) ?? "";
-  const birthRaw = sanitized.find((value) => /\d{2}\/\d{2}\/\d{4}/.test(value));
-  const club_name =
-    sanitized.find((value) => normalizeText(value).includes("MARINGA") || normalizeText(value).includes("GALO")) ??
-    "";
-  const position =
-    sanitized.find((value) =>
-      ["GOLEIRO", "ZAGUEIRO", "LATERAL", "MEIA", "VOLANTE", "ATACANTE", "PONTA", "ALA"].some((pos) =>
-        normalizeText(value).includes(pos)
-      )
-    ) ?? undefined;
-
-  return {
-    cbf_registry: sanitizeText(cbf_registry),
-    name: sanitizeText(name),
-    birth_date: birthRaw ? parseBirthDate(birthRaw) : undefined,
-    position: position ? sanitizeText(position) : undefined,
-    club_name: sanitizeText(club_name),
-  };
+function resolveHeaderIndex(headers: string[], matcher: (header: string) => boolean, fallback: number) {
+  const idx = headers.findIndex((header) => matcher(normalizeText(header)));
+  return idx >= 0 ? idx : fallback;
 }
 
 function resolveCompetitionRosterUrl(base: string) {
@@ -130,80 +91,89 @@ export async function fetchEligibleAthletesWithDebug(competitionUrlBase: string)
     const html = await response.text();
     const $ = load(html);
 
+    const galoTable = findGaloRosterTable($);
+    if (!galoTable || galoTable.length === 0) {
+      return {
+        athletes: [],
+        debug: {
+          rows_total: 0,
+          galo_rows: 0,
+        },
+      };
+    }
+
     const athletes: FpfRosterAthlete[] = [];
     let rows_total = 0;
-    let rows_discarded = 0;
     let galo_rows = 0;
 
-    const tables = $("table").toArray();
+    const headerCells = galoTable
+      .find("thead tr th")
+      .toArray()
+      .map((cell) => sanitizeText($(cell).text()))
+      .filter(Boolean);
 
-    for (const table of tables) {
-      const headerCells = $(table)
-        .find("thead tr th")
-        .toArray()
-        .map((cell) => sanitizeText($(cell).text()))
-        .filter(Boolean);
-
-      const hasHeader = headerCells.length > 0;
-      const headers = hasHeader ? headerCells : [];
-
-      $(table)
-        .find("tbody tr, tr")
-        .each((_, row) => {
-          const rowText = sanitizeText($(row).text());
-          if (!rowText) return;
-
-          rows_total += 1;
-
-          if (rowText.length > 400) {
-            rows_discarded += 1;
-            return;
-          }
-
-          const cells = $(row)
-            .find("td,th")
+    const fallbackHeaderCells =
+      headerCells.length > 0
+        ? headerCells
+        : galoTable
+            .find("tr")
+            .first()
+            .find("th,td")
             .toArray()
             .map((cell) => sanitizeText($(cell).text()))
             .filter(Boolean);
 
-          if (cells.length < 3) {
-            rows_discarded += 1;
-            return;
-          }
+    const nicknameIdx = resolveHeaderIndex(
+      fallbackHeaderCells,
+      (header) => header.includes("APELIDO"),
+      0
+    );
+    const nameIdx = resolveHeaderIndex(
+      fallbackHeaderCells,
+      (header) => header.includes("NOME"),
+      1
+    );
+    const cbfIdx = resolveHeaderIndex(
+      fallbackHeaderCells,
+      (header) => header.includes("REGISTRO") || header.includes("CBF"),
+      2
+    );
+    const habilitationIdx = resolveHeaderIndex(
+      fallbackHeaderCells,
+      (header) => header.includes("HABILIT"),
+      3
+    );
 
-          if (looksLikeHeader(cells)) {
-            rows_discarded += 1;
-            return;
-          }
+    galoTable.find("tbody tr, tr").each((_, row) => {
+      const cells = $(row)
+        .find("td,th")
+        .toArray()
+        .map((cell) => sanitizeText($(cell).text()))
+        .filter(Boolean);
 
-          const parsed = headers.length > 0 ? parseRowByHeader(headers, cells) : parseRowByGuess(cells);
+      if (cells.length < 3) return;
+      if (normalizeText(cells.join(" ")).includes("REGISTRO CBF")) return;
 
-          if (!parsed.cbf_registry || !parsed.name) {
-            rows_discarded += 1;
-            return;
-          }
+      rows_total += 1;
 
-          if (!parsed.club_name || !normalizeClubForFilter(parsed.club_name)) {
-            rows_discarded += 1;
-            return;
-          }
+      const cbf_registry = cleanCbfRegistry(cells[cbfIdx] ?? "");
+      const name = sanitizeText(cells[nameIdx] ?? "");
+      const nickname = sanitizeText(cells[nicknameIdx] ?? "");
+      const habilitation_date = parseDate(cells[habilitationIdx] ?? "");
 
-          if (parsed.name.length > 100) {
-            rows_discarded += 1;
-            return;
-          }
+      if (!cbf_registry || !name) return;
+      if (name.length > 100 || nickname.length > 100) return;
 
-          galo_rows += 1;
+      galo_rows += 1;
 
-          athletes.push({
-            cbf_registry: parsed.cbf_registry,
-            name: parsed.name,
-            birth_date: parsed.birth_date,
-            position: parsed.position,
-            club_name: "GALO MARINGA",
-          });
-        });
-    }
+      athletes.push({
+        cbf_registry,
+        name,
+        nickname,
+        habilitation_date,
+        club_name: "GALO MARINGA",
+      });
+    });
 
     const deduped = new Map<string, FpfRosterAthlete>();
     for (const athlete of athletes) {
@@ -216,7 +186,6 @@ export async function fetchEligibleAthletesWithDebug(competitionUrlBase: string)
       athletes: Array.from(deduped.values()),
       debug: {
         rows_total,
-        rows_discarded,
         galo_rows,
       },
     };
@@ -225,7 +194,6 @@ export async function fetchEligibleAthletesWithDebug(competitionUrlBase: string)
       athletes: [],
       debug: {
         rows_total: 0,
-        rows_discarded: 0,
         galo_rows: 0,
       },
     };
@@ -236,4 +204,3 @@ export async function fetchEligibleAthletes(competitionUrlBase: string): Promise
   const { athletes } = await fetchEligibleAthletesWithDebug(competitionUrlBase);
   return athletes;
 }
-
