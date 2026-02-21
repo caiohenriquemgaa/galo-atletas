@@ -138,6 +138,8 @@ export async function POST() {
     let matchesImported = 0;
     let fetchedBytes = 0;
     let anchorsFound = 0;
+    let candidatesParsed = 0;
+    let candidatesDiscardedTooLong = 0;
     let rowsWithXFound = 0;
     let galoRowsFound = 0;
     let detailsAttempted = 0;
@@ -155,6 +157,8 @@ export async function POST() {
 
       fetchedBytes += debug.fetched_bytes;
       anchorsFound += debug.anchors_found;
+      candidatesParsed += debug.candidates_parsed;
+      candidatesDiscardedTooLong += debug.candidates_discarded_too_long;
       rowsWithXFound += debug.rows_with_x_found;
       galoRowsFound += debug.galo_rows_found;
 
@@ -195,42 +199,55 @@ export async function POST() {
         };
       });
 
-      const importRows: MatchImportRow[] = detailedMatches.map((item) => {
-        const details = item.details;
+      const importRows: MatchImportRow[] = detailedMatches
+        .map((item) => {
+          const details = item.details;
 
-        const resolvedHomeTeam = details?.home_team ?? item.home_team;
-        const resolvedAwayTeam = details?.away_team ?? item.away_team;
-        const galoHome = isGaloMaringa(resolvedHomeTeam);
+          const resolvedHomeTeam = (details?.home_team ?? item.home_team).replace(/\s+/g, " ").trim();
+          const resolvedAwayTeam = (details?.away_team ?? item.away_team).replace(/\s+/g, " ").trim();
+          const galoHome = isGaloMaringa(resolvedHomeTeam);
 
-        const goalsHome = details?.goals_home ?? item.goals_home;
-        const goalsAway = details?.goals_away ?? item.goals_away;
+          const goalsHome = details?.goals_home ?? item.goals_home;
+          const goalsAway = details?.goals_away ?? item.goals_away;
 
-        const matchDateIso = item.match_date.toISOString().slice(0, 10);
+          const matchDateIso = item.match_date.toISOString().slice(0, 10);
+          const opponent = (galoHome ? resolvedAwayTeam : resolvedHomeTeam).replace(/\s+/g, " ").trim();
+          const opponentNormalized = normalizeText(opponent);
 
-        return {
-          competition_name: competition.name,
-          season_year: competition.season_year,
-          match_date: matchDateIso,
-          opponent: galoHome ? resolvedAwayTeam : resolvedHomeTeam,
-          home: galoHome,
-          goals_for: galoHome ? (goalsHome ?? 0) : (goalsAway ?? 0),
-          goals_against: galoHome ? (goalsAway ?? 0) : (goalsHome ?? 0),
-          source: "FPF",
-          source_url: stableSourceUrl({
-            competitionUrlBase,
-            seasonYear: competition.season_year,
-            matchDateIso,
-            homeTeam: resolvedHomeTeam,
-            awayTeam: resolvedAwayTeam,
-            detailsUrl: item.details_url,
-          }),
-          venue: details?.venue ?? null,
-          kickoff_time: details?.kickoff_time ?? null,
-          referee: details?.referee ?? null,
-          home_team: resolvedHomeTeam,
-          away_team: resolvedAwayTeam,
-        };
-      });
+          if (
+            !opponent ||
+            opponent.length > 60 ||
+            opponentNormalized.includes("COOKIES") ||
+            opponentNormalized.includes("FEDERACAO PARANAENSE")
+          ) {
+            return null;
+          }
+
+          return {
+            competition_name: competition.name,
+            season_year: competition.season_year,
+            match_date: matchDateIso,
+            opponent,
+            home: galoHome,
+            goals_for: galoHome ? (goalsHome ?? 0) : (goalsAway ?? 0),
+            goals_against: galoHome ? (goalsAway ?? 0) : (goalsHome ?? 0),
+            source: "FPF",
+            source_url: stableSourceUrl({
+              competitionUrlBase,
+              seasonYear: competition.season_year,
+              matchDateIso,
+              homeTeam: resolvedHomeTeam,
+              awayTeam: resolvedAwayTeam,
+              detailsUrl: item.details_url,
+            }),
+            venue: details?.venue ?? null,
+            kickoff_time: details?.kickoff_time ?? null,
+            referee: details?.referee ?? null,
+            home_team: resolvedHomeTeam,
+            away_team: resolvedAwayTeam,
+          };
+        })
+        .filter((row): row is MatchImportRow => row !== null);
 
       const stateHash = hashPayload(
         importRows
@@ -305,6 +322,9 @@ export async function POST() {
       competitions_checked: competitionsChecked,
       fetched_bytes: fetchedBytes,
       anchors_found: anchorsFound,
+      candidates_parsed: candidatesParsed,
+      candidates_discarded_too_long: candidatesDiscardedTooLong,
+      imported: matchesImported,
       rows_with_x_found: rowsWithXFound,
       galo_rows_found: galoRowsFound,
       matches_found: matchesFound,

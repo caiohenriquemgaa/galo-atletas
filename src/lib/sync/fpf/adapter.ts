@@ -14,6 +14,9 @@ export type FpfNormalizedMatch = {
 export type FpfAdapterDebug = {
   fetched_bytes: number;
   anchors_found: number;
+  candidates_parsed: number;
+  candidates_discarded_too_long: number;
+  imported: number;
   rows_with_x_found: number;
   galo_rows_found: number;
 };
@@ -47,8 +50,13 @@ function normalizeText(value: string) {
 
 function cleanTeamName(value: string) {
   return value
+    .replace(/\b(SOBRE O JOGO|ESTADIO|ESTÁDIO|LOCAL|RODADA|HORARIO|HORÁRIO|HORA|DATA|ARBITRO|ÁRBITRO|ARBITRAGEM)\b/gi, " ")
+    .replace(/[0-9]{1,2}\s*[x×]\s*[0-9]{1,2}/g, " ")
+    .replace(/\d{2}\/\d{2}(?:\/\d{4})?/g, " ")
+    .replace(/\d{1,2}:\d{2}/g, " ")
     .replace(/\s+/g, " ")
     .replace(/[|•]/g, " ")
+    .replace(/^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9]+$/g, "")
     .trim();
 }
 
@@ -86,25 +94,29 @@ function parseScore(raw: string): { goalsHome: number | null; goalsAway: number 
 }
 
 function parseTeams(raw: string): { homeTeam: string; awayTeam: string } | null {
-  const normalizedX = raw.replace(/[×]/g, "x");
-  const parts = normalizedX.split(/\sx\s/i).map((part) => cleanTeamName(part));
+  let working = raw.replace(/\s+/g, " ").trim();
+  working = working.replace(/\bSOBRE O JOGO\b/gi, " ");
+  working = working.replace(/\b\d{1,2}\s*[x×]\s*\d{1,2}\b/g, " ");
+  working = working.replace(/\b\d{2}\/\d{2}(?:\/\d{4})?\b/g, " ");
+  working = working.replace(/\b\d{1,2}:\d{2}\b/g, " ");
+  working = working.replace(/\s+/g, " ").trim();
 
-  if (parts.length < 2) return null;
+  const splitMatch = /\s([x×])\s/i.exec(working);
+  if (!splitMatch || splitMatch.index < 0) return null;
 
-  const left = parts[0];
-  const right = parts[1];
+  const separator = splitMatch[0];
+  const leftRaw = working.slice(0, splitMatch.index).trim();
+  const rightRaw = working.slice(splitMatch.index + separator.length).trim();
+
+  if (!leftRaw || !rightRaw) return null;
+
+  const left = cleanTeamName(leftRaw.split(/(?:\||•| - )/).pop() ?? "");
+  const right = cleanTeamName(rightRaw.split(/(?:\||•| - )/)[0] ?? "");
 
   if (!/[A-Za-zÀ-ÿ]/.test(left) || !/[A-Za-zÀ-ÿ]/.test(right)) return null;
+  if (left.length > 80 || right.length > 80) return null;
 
-  const leftNoScore = left.replace(/\b\d+\b/g, "").trim();
-  const rightNoScore = right.replace(/\b\d+\b/g, "").trim();
-
-  if (!leftNoScore || !rightNoScore) return null;
-
-  return {
-    homeTeam: leftNoScore,
-    awayTeam: rightNoScore,
-  };
+  return { homeTeam: left, awayTeam: right };
 }
 
 function absoluteUrl(urlBase: string, href: string | null) {
@@ -186,6 +198,29 @@ function parseMainScoreAndTeams(text: string) {
   };
 }
 
+function pickRowFromLink($: ReturnType<typeof load>, link: Parameters<ReturnType<typeof load>["$"]>[0]) {
+  const byTr = $(link).closest("tr");
+  if (byTr.length > 0) return byTr;
+
+  const byRow = $(link).closest(".row");
+  if (byRow.length > 0) return byRow;
+
+  const byArticle = $(link).closest("article");
+  if (byArticle.length > 0) return byArticle;
+
+  const parent = $(link).parent();
+  if (parent.length > 0 && parent.parent().length > 0) return parent.parent();
+
+  const byDiv = $(link).closest("div");
+  if (byDiv.length > 0) return byDiv;
+
+  return parent;
+}
+
+function hasTeamsContext(text: string) {
+  return /[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}\s*[x×]\s*[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}/i.test(text);
+}
+
 export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDetails> {
   try {
     const response = await fetch(detailsUrl, {
@@ -204,11 +239,11 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
     const $ = load(html);
 
     const mainBlocks = [
-      $("main").text(),
-      $("section").first().text(),
-      $(".placar, .score, .resultado, .jogo, .match").text(),
-      $("body").text(),
+      $(".placar, .score, .resultado, .jogo, .match, .match-details, .game-details").first().text(),
+      $("main .container, main section, article, section").first().text(),
+      $("h1, h2").first().text(),
     ]
+      .filter(Boolean)
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
@@ -255,33 +290,37 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
 
   const candidates: FpfNormalizedMatch[] = [];
   let anchors_found = 0;
+  let candidates_parsed = 0;
+  let candidates_discarded_too_long = 0;
   let rows_with_x_found = 0;
 
-  // Strategy A: anchor text / row text around links "SOBRE O JOGO"
+  // Strategy A: row text around links exactly "SOBRE O JOGO"
   const aboutLinks = $("a")
-    .filter((_, el) => normalizeText($(el).text()).includes("SOBRE O JOGO"))
+    .filter((_, el) => normalizeText($(el).text()) === "SOBRE O JOGO")
     .toArray();
 
   anchors_found = aboutLinks.length;
 
   for (const link of aboutLinks) {
+    try {
     const href = $(link).attr("href") ?? null;
     const details_url = absoluteUrl(url_base, href);
 
-    const rowText = $(link).closest("tr").text().trim();
-    const parentText = $(link).parent().text().trim();
-    const fullText = $(link).closest("li,div,section,article").text().trim();
+    const row = pickRowFromLink($, link);
+    const rowText = row.text().replace(/\s+/g, " ").trim();
 
-    const sourceText = [rowText, parentText, fullText, $(link).text()].find(
-      (chunk) => chunk && /[x×]/i.test(chunk)
-    );
-
-    if (!sourceText) continue;
+    if (!rowText) continue;
+    if (rowText.length > 400) {
+      candidates_discarded_too_long += 1;
+      continue;
+    }
+    if (!hasTeamsContext(rowText)) continue;
 
     rows_with_x_found += 1;
 
-    const parsed = parseLine(sourceText, meta.season_year);
+    const parsed = parseLine(rowText, meta.season_year);
     if (!parsed) continue;
+    candidates_parsed += 1;
 
     candidates.push({
       competition_name: meta.competition_name,
@@ -293,24 +332,36 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
       goals_away: parsed.goals_away,
       details_url,
     });
+    } catch {
+      // tolerant parser
+    }
   }
 
   // Strategy B fallback: sweep body chunks for pattern "×" + "SOBRE O JOGO"
   if (candidates.length === 0) {
-    $("tr, li, p, div").each((_, el) => {
+    $("tr, article, .row, section, div").each((_, el) => {
       try {
         const text = $(el).text().replace(/\s+/g, " ").trim();
         if (!text) return;
+        if (text.length > 400) {
+          candidates_discarded_too_long += 1;
+          return;
+        }
 
         const hasGameWord = normalizeText(text).includes("SOBRE O JOGO");
-        if (!hasGameWord || !/[x×]/i.test(text)) return;
+        if (!hasGameWord || !hasTeamsContext(text)) return;
 
         rows_with_x_found += 1;
 
         const parsed = parseLine(text, meta.season_year);
         if (!parsed) return;
+        candidates_parsed += 1;
 
-        const detailsHref = $(el).find("a[href]").first().attr("href") ?? null;
+        const detailsHref = $(el)
+          .find("a")
+          .filter((__, anchor) => normalizeText($(anchor).text()) === "SOBRE O JOGO")
+          .first()
+          .attr("href") ?? null;
         const details_url = absoluteUrl(url_base, detailsHref);
 
         candidates.push({
@@ -341,6 +392,9 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
     debug: {
       fetched_bytes,
       anchors_found,
+      candidates_parsed,
+      candidates_discarded_too_long,
+      imported: filtered.length,
       rows_with_x_found,
       galo_rows_found,
     } as FpfAdapterDebug,
