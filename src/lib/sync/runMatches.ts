@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { fetchCompetitionMatchesWithDebug, fetchMatchDetails } from "@/lib/sync/fpf/adapter";
+import { linkAthlete } from "@/lib/linking/linkAthlete";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 
 type CompetitionRow = {
@@ -33,6 +34,35 @@ type MatchImportRow = {
   away_team: string | null;
 };
 
+type UpsertedMatchRow = {
+  id: string;
+  source_url: string;
+};
+
+type MatchPlayerStatImportRow = {
+  match_id: string;
+  athlete_id: string | null;
+  cbf_registry: string | null;
+  athlete_name_raw: string | null;
+  minutes: number | null;
+  goals: number;
+  assists: number;
+  yellow: number;
+  red: number;
+  source: "MOCK";
+};
+
+type MockAthleteSeed = {
+  cbf_registry: string | null;
+  name: string;
+};
+
+type PendingAthleteStatPayload = {
+  match_id: string;
+  athlete_name_raw: string | null;
+  cbf_registry: string | null;
+};
+
 export type MatchesSyncSummary = {
   source: "FPF";
   competitions_checked: number;
@@ -49,6 +79,7 @@ export type MatchesSyncSummary = {
   details_succeeded: number;
   details_failed: number;
   matches_updated_with_score: number;
+  players_linked: number;
 };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -109,6 +140,80 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+async function loadMockAthleteSeeds(supabase: ReturnType<typeof createClient>) {
+  const { data, error } = await supabase
+    .from("athletes")
+    .select("cbf_registry,name")
+    .eq("club_name", "GALO MARINGA")
+    .eq("is_active_fpf", true)
+    .order("name", { ascending: true })
+    .limit(11);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data as MockAthleteSeed[]) ?? []).filter((row) => !!row.name?.trim());
+}
+
+async function buildMockStatsRowsForMatches(
+  supabase: ReturnType<typeof createClient>,
+  matches: UpsertedMatchRow[],
+  seeds: MockAthleteSeed[]
+) {
+  const rows: MatchPlayerStatImportRow[] = [];
+  const pendingPayloads: PendingAthleteStatPayload[] = [];
+  let linkedCount = 0;
+
+  for (const match of matches) {
+    const dedupeKeys = new Set<string>();
+
+    for (const seed of seeds) {
+      const athleteId = await linkAthlete({
+        supabase,
+        cbf_registry: seed.cbf_registry,
+        name_raw: seed.name,
+      });
+
+      const dedupeKey = athleteId
+        ? `athlete:${athleteId}`
+        : `raw:${seed.cbf_registry ?? ""}:${seed.name.trim().toUpperCase()}`;
+
+      if (dedupeKeys.has(dedupeKey)) continue;
+      dedupeKeys.add(dedupeKey);
+
+      if (athleteId) {
+        linkedCount += 1;
+      } else {
+        pendingPayloads.push({
+          match_id: match.id,
+          athlete_name_raw: seed.name,
+          cbf_registry: seed.cbf_registry,
+        });
+      }
+
+      rows.push({
+        match_id: match.id,
+        athlete_id: athleteId,
+        cbf_registry: seed.cbf_registry,
+        athlete_name_raw: seed.name,
+        minutes: 0,
+        goals: 0,
+        assists: 0,
+        yellow: 0,
+        red: 0,
+        source: "MOCK",
+      });
+    }
+  }
+
+  return {
+    rows,
+    pendingPayloads,
+    linkedCount,
+  };
+}
+
 export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: MatchesSyncSummary }> {
   if (!supabaseUrl || !supabaseKey) {
     throw new Error("Missing Supabase env vars.");
@@ -155,6 +260,8 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
     let detailsSucceeded = 0;
     let detailsFailed = 0;
     let matchesUpdatedWithScore = 0;
+    let playersLinked = 0;
+    const mockSeeds = await loadMockAthleteSeeds(supabase);
 
     for (const competition of activeCompetitions) {
       const competitionUrlBase = competition.url_base;
@@ -301,12 +408,70 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
       }
 
       if (importRows.length > 0) {
-        const { error: upsertError } = await supabase.from("matches").upsert(importRows, {
-          onConflict: "source,source_url",
-        });
+        const { data: upsertedMatches, error: upsertError } = await supabase
+          .from("matches")
+          .upsert(importRows, {
+            onConflict: "source,source_url",
+          })
+          .select("id,source_url");
 
         if (upsertError) {
           throw new Error(upsertError.message);
+        }
+
+        const importedMatchRows = (upsertedMatches as UpsertedMatchRow[]) ?? [];
+
+        if (importedMatchRows.length > 0 && mockSeeds.length > 0) {
+          const { rows: statRows, pendingPayloads, linkedCount } = await buildMockStatsRowsForMatches(
+            supabase,
+            importedMatchRows,
+            mockSeeds
+          );
+
+          if (statRows.length > 0) {
+            const matchIds = Array.from(new Set(importedMatchRows.map((row) => row.id)));
+
+            const { error: deleteStatsError } = await supabase
+              .from("match_player_stats")
+              .delete()
+              .eq("source", "MOCK")
+              .in("match_id", matchIds);
+
+            if (deleteStatsError) {
+              throw new Error(deleteStatsError.message);
+            }
+
+            const { error: insertStatsError } = await supabase.from("match_player_stats").insert(statRows);
+
+            if (insertStatsError) {
+              throw new Error(insertStatsError.message);
+            }
+          }
+
+          if (pendingPayloads.length > 0) {
+            const uniquePayloads = Array.from(
+              new Map(
+                pendingPayloads.map((payload) => [
+                  `${payload.match_id}|${payload.cbf_registry ?? ""}|${payload.athlete_name_raw ?? ""}`,
+                  payload,
+                ])
+              ).values()
+            );
+
+            const pendingRows = uniquePayloads.map((payload) => ({
+              source: "FPF",
+              kind: "athlete_stat",
+              payload,
+            }));
+
+            const { error: pendingInsertError } = await supabase.from("sync_pending_links").insert(pendingRows);
+
+            if (pendingInsertError) {
+              throw new Error(pendingInsertError.message);
+            }
+          }
+
+          playersLinked += linkedCount;
         }
 
         matchesImported += importRows.length;
@@ -340,6 +505,7 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
       details_succeeded: detailsSucceeded,
       details_failed: detailsFailed,
       matches_updated_with_score: matchesUpdatedWithScore,
+      players_linked: playersLinked,
     };
 
     const { data: doneRun, error: doneError } = await supabase
