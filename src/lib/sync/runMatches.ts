@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchCompetitionMatchesWithDebug, fetchMatchDetails } from "@/lib/sync/fpf/adapter";
 import { linkAthlete } from "@/lib/linking/linkAthlete";
 import type { Database } from "@/lib/supabase/database.types";
+import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 
 type CompetitionRow = {
@@ -83,9 +83,6 @@ export type MatchesSyncSummary = {
   matches_updated_with_score: number;
   players_linked: number;
 };
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 function normalizeText(value: string) {
   return value
@@ -217,11 +214,7 @@ async function buildMockStatsRowsForMatches(
 }
 
 export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: MatchesSyncSummary }> {
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Missing Supabase env vars.");
-  }
-
-  const supabase = createClient<Database>(supabaseUrl, supabaseKey);
+  const supabase = getSupabaseAdmin();
   let runId: string | null = null;
 
   try {

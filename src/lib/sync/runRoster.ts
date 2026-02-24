@@ -1,5 +1,5 @@
-import { createClient } from "@supabase/supabase-js";
 import { fetchEligibleAthletesWithDebug } from "@/lib/sync/fpf/roster";
+import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
 
 export type SyncRunRow = {
   id: string;
@@ -38,9 +38,6 @@ export type RosterSyncSummary = {
   updated: number;
 };
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
 function extractCompetitionId(urlBase: string) {
   const clean = urlBase.replace(/\/+$/, "");
   const match = clean.match(/\/(\d+)$/);
@@ -48,11 +45,7 @@ function extractCompetitionId(urlBase: string) {
 }
 
 export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: RosterSyncSummary }> {
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Missing Supabase env vars.");
-  }
-
-  const supabase = createClient(supabaseUrl, supabaseKey);
+  const supabase = getSupabaseAdmin();
   let runId: string | null = null;
 
   try {
