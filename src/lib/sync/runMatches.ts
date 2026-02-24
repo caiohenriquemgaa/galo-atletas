@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchCompetitionMatchesWithDebug, fetchMatchDetails } from "@/lib/sync/fpf/adapter";
 import { linkAthlete } from "@/lib/linking/linkAthlete";
+import type { Database } from "@/lib/supabase/database.types";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 
 type CompetitionRow = {
@@ -140,7 +142,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function loadMockAthleteSeeds(supabase: ReturnType<typeof createClient>) {
+async function loadMockAthleteSeeds(supabase: SupabaseClient<Database>) {
   const { data, error } = await supabase
     .from("athletes")
     .select("cbf_registry,name")
@@ -157,7 +159,7 @@ async function loadMockAthleteSeeds(supabase: ReturnType<typeof createClient>) {
 }
 
 async function buildMockStatsRowsForMatches(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient<Database>,
   matches: UpsertedMatchRow[],
   seeds: MockAthleteSeed[]
 ) {
@@ -219,7 +221,7 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
     throw new Error("Missing Supabase env vars.");
   }
 
-  const supabase = createClient(supabaseUrl, supabaseKey);
+  const supabase = createClient<Database>(supabaseUrl, supabaseKey);
   let runId: string | null = null;
 
   try {
