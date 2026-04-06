@@ -1,5 +1,6 @@
 import { fetchEligibleAthletesWithDebug } from "@/lib/sync/fpf/roster";
 import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
+import { extractCompetitionId, normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
 
 export type SyncRunRow = {
   id: string;
@@ -13,6 +14,7 @@ export type SyncRunRow = {
 type CompetitionRow = {
   id: string;
   name: string;
+  category?: string | null;
   url_base: string | null;
   is_active: boolean;
 };
@@ -29,6 +31,11 @@ type AthleteImportRow = {
   last_seen_at: string;
 };
 
+type ExistingAthleteRow = {
+  id: string;
+  cbf_registry: string;
+};
+
 export type RosterSyncSummary = {
   source: "FPF_ROSTER";
   comps_checked: number;
@@ -37,12 +44,6 @@ export type RosterSyncSummary = {
   imported: number;
   updated: number;
 };
-
-function extractCompetitionId(urlBase: string) {
-  const clean = urlBase.replace(/\/+$/, "");
-  const match = clean.match(/\/(\d+)$/);
-  return match?.[1] ?? null;
-}
 
 export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: RosterSyncSummary }> {
   const supabase = getSupabaseAdmin();
@@ -63,7 +64,7 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
 
     const { data: competitions, error: competitionsError } = await supabase
       .from("competitions_registry")
-      .select("id,name,url_base,is_active")
+      .select("id,name,category,url_base,is_active")
       .eq("is_active", true)
       .order("season_year", { ascending: false });
 
@@ -90,17 +91,18 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
     }
 
     for (const competition of activeCompetitions) {
-      if (!competition.url_base) continue;
+      const competitionUrlBase = normalizeCompetitionUrlBase(competition.url_base, competition.category);
+      if (!competitionUrlBase) continue;
       compsChecked += 1;
 
-      const { athletes, debug } = await fetchEligibleAthletesWithDebug(competition.url_base);
+      const { athletes, debug } = await fetchEligibleAthletesWithDebug(competitionUrlBase);
 
       rowsTotal += debug.rows_total;
       galoRows += debug.galo_rows;
 
       if (athletes.length === 0) continue;
 
-      const competitionId = extractCompetitionId(competition.url_base);
+      const competitionId = extractCompetitionId(competitionUrlBase);
       const nowIso = new Date().toISOString();
 
       const importRows: AthleteImportRow[] = athletes.map((athlete) => ({
@@ -119,7 +121,7 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
 
       const { data: existingRows, error: existingError } = await supabase
         .from("athletes")
-        .select("cbf_registry")
+        .select("id,cbf_registry")
         .eq("source", "FPF")
         .in("cbf_registry", cbfKeys);
 
@@ -127,18 +129,39 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
         throw new Error(existingError.message);
       }
 
-      const existingSet = new Set<string>(((existingRows as { cbf_registry: string }[]) ?? []).map((row) => row.cbf_registry));
+      const existingMap = new Map<string, string>(
+        ((existingRows as ExistingAthleteRow[]) ?? []).map((row) => [row.cbf_registry, row.id])
+      );
+      const existingSet = new Set<string>(existingMap.keys());
 
-      const { error: upsertError } = await supabase.from("athletes").upsert(importRows, {
-        onConflict: "source,cbf_registry",
-      });
+      const newRows = importRows.filter((row) => !existingMap.has(row.cbf_registry));
+      const updateRows = importRows
+        .map((row) => ({
+          id: existingMap.get(row.cbf_registry) ?? null,
+          row,
+        }))
+        .filter((entry): entry is { id: string; row: AthleteImportRow } => !!entry.id);
 
-      if (upsertError) {
-        throw new Error(upsertError.message);
+      if (newRows.length > 0) {
+        const { error: insertError } = await supabase.from("athletes").insert(newRows);
+        if (insertError) {
+          throw new Error(insertError.message);
+        }
+      }
+
+      for (const entry of updateRows) {
+        const { error: updateError } = await supabase
+          .from("athletes")
+          .update(entry.row)
+          .eq("id", entry.id);
+
+        if (updateError) {
+          throw new Error(updateError.message);
+        }
       }
 
       updated += existingSet.size;
-      imported += importRows.length - existingSet.size;
+      imported += newRows.length;
     }
 
     const summary: RosterSyncSummary = {
