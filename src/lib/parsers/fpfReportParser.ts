@@ -2,6 +2,7 @@ import type {
   CanonicalAthlete,
   CanonicalCardEvent,
   CanonicalCardPhase,
+  CanonicalLineupRole,
   CanonicalMatchClock,
   CanonicalMatchMeta,
   CanonicalMatchPhase,
@@ -240,7 +241,7 @@ function isLineupNoise(line: string) {
   );
 }
 
-function roleFromToken(token: string) {
+function roleFromToken(token: string): CanonicalLineupRole | null {
   if (token === "T") return "STARTER";
   if (token === "R") return "RESERVE";
   if (token === "GT") return "GK_STARTER";
@@ -629,12 +630,13 @@ function parseSequentialSubstitutions(sectionLines: string[], context: TeamConte
       continue;
     }
 
-    const rawPhase = header[2].toUpperCase() as CanonicalSubstitutionPhase;
-    if (rawPhase === "POS") {
+    const rawPhaseToken = header[2].toUpperCase();
+    if (rawPhaseToken === "POS") {
       i += 1;
       continue;
     }
 
+    const rawPhase = rawPhaseToken as CanonicalSubstitutionPhase;
     const half = rawPhase === "2T" ? 2 : 1;
     const minute = rawPhase === "INT" ? 45 : Number(header[1]);
     const teamSide = resolveTeamSide(context, header[3]);

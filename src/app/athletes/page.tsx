@@ -171,8 +171,9 @@ export default function AthletesPage() {
         match: pickMatch(row.match),
       };
 
-      const match = normalizedRow.match;
       if (!isCompletedStatsExportRow(normalizedRow)) continue;
+      const match = normalizedRow.match;
+      if (!match) continue;
 
       if (competitionFilter !== "ALL" && match.competition_name !== competitionFilter) continue;
       if (seasonFilter !== "ALL" && String(match.season_year) !== seasonFilter) continue;
