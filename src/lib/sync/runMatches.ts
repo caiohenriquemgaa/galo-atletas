@@ -2,13 +2,16 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchCompetitionMatchesWithDebug, fetchMatchDetails } from "@/lib/sync/fpf/adapter";
 import { linkAthlete } from "@/lib/linking/linkAthlete";
+import { syncFinishedMatchReport } from "@/lib/sumula/syncFinishedMatchReport";
 import type { Database } from "@/lib/supabase/database.types";
 import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
+import { normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 
 type CompetitionRow = {
   id: string;
   name: string;
+  category?: string | null;
   season_year: number;
   url_base: string | null;
   is_active: boolean;
@@ -39,6 +42,8 @@ type MatchImportRow = {
 type UpsertedMatchRow = {
   id: string;
   source_url: string;
+  match_date?: string;
+  home?: boolean | null;
 };
 
 type MatchPlayerStatImportRow = {
@@ -46,6 +51,7 @@ type MatchPlayerStatImportRow = {
   athlete_id: string | null;
   cbf_registry: string | null;
   athlete_name_raw: string | null;
+  team_side: "HOME" | "AWAY";
   minutes: number | null;
   goals: number;
   assists: number;
@@ -82,6 +88,8 @@ export type MatchesSyncSummary = {
   details_failed: number;
   matches_updated_with_score: number;
   players_linked: number;
+  reports_synced: number;
+  reports_failed: number;
 };
 
 function normalizeText(value: string) {
@@ -196,6 +204,7 @@ async function buildMockStatsRowsForMatches(
         athlete_id: athleteId,
         cbf_registry: seed.cbf_registry,
         athlete_name_raw: seed.name,
+        team_side: match.home ? "HOME" : "AWAY",
         minutes: 0,
         goals: 0,
         assists: 0,
@@ -210,6 +219,36 @@ async function buildMockStatsRowsForMatches(
     rows,
     pendingPayloads,
     linkedCount,
+  };
+}
+
+async function syncFinishedReportsForMatches(
+  supabase: SupabaseClient<Database>,
+  targets: Array<{ matchId: string; sumulaUrl: string }>
+) {
+  let reportsSynced = 0;
+  let reportsFailed = 0;
+
+  for (const target of targets) {
+    try {
+      await syncFinishedMatchReport(supabase, {
+        matchId: target.matchId,
+        sumulaUrl: target.sumulaUrl,
+      });
+      reportsSynced += 1;
+    } catch (error) {
+      reportsFailed += 1;
+      console.error("[sync.matches] failed to sync finished report", {
+        matchId: target.matchId,
+        sumulaUrl: target.sumulaUrl,
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+    }
+  }
+
+  return {
+    reportsSynced,
+    reportsFailed,
   };
 }
 
@@ -232,7 +271,7 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
 
     const { data: competitions, error: competitionsError } = await supabase
       .from("competitions_registry")
-      .select("id,name,season_year,url_base,is_active")
+      .select("id,name,category,season_year,url_base,is_active")
       .eq("is_active", true)
       .order("season_year", { ascending: false });
 
@@ -256,10 +295,12 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
     let detailsFailed = 0;
     let matchesUpdatedWithScore = 0;
     let playersLinked = 0;
+    let reportsSynced = 0;
+    let reportsFailed = 0;
     const mockSeeds = await loadMockAthleteSeeds(supabase);
 
     for (const competition of activeCompetitions) {
-      const competitionUrlBase = competition.url_base;
+      const competitionUrlBase = normalizeCompetitionUrlBase(competition.url_base, competition.category);
       if (!competitionUrlBase) continue;
 
       competitionsChecked += 1;
@@ -310,6 +351,7 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
         };
       });
 
+      const sumulaUrlBySourceUrl = new Map<string, string | null>();
       const importRows = detailedMatches.flatMap((item): MatchImportRow[] => {
         const details = item.details;
 
@@ -333,6 +375,17 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
           return [];
         }
 
+        const sourceUrl = stableSourceUrl({
+          competitionUrlBase,
+          seasonYear: competition.season_year,
+          matchDateIso,
+          homeTeam: resolvedHomeTeam,
+          awayTeam: resolvedAwayTeam,
+          detailsUrl: item.details_url,
+        });
+
+        sumulaUrlBySourceUrl.set(sourceUrl, details?.sumula_url ?? null);
+
         return [{
           competition_name: competition.name,
           season_year: competition.season_year,
@@ -342,14 +395,7 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
           goals_for: galoHome ? goalsHome : goalsAway,
           goals_against: galoHome ? goalsAway : goalsHome,
           source: "FPF" as const,
-          source_url: stableSourceUrl({
-            competitionUrlBase,
-            seasonYear: competition.season_year,
-            matchDateIso,
-            homeTeam: resolvedHomeTeam,
-            awayTeam: resolvedAwayTeam,
-            detailsUrl: item.details_url,
-          }),
+          source_url: sourceUrl,
           venue: details?.venue ?? null,
           kickoff_time: details?.kickoff_time ?? null,
           referee: details?.referee ?? null,
@@ -387,8 +433,69 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
       }
 
       const nowIso = new Date().toISOString();
+      const todayIso = new Date().toISOString().slice(0, 10);
+      let existingMatchMap = new Map<string, string>();
+
+      if (importRows.length > 0) {
+        const sourceUrls = importRows.map((row) => row.source_url);
+        const { data: existingMatches, error: existingMatchesError } = await supabase
+          .from("matches")
+          .select("id,source_url,match_date")
+          .eq("source", "FPF")
+          .in("source_url", sourceUrls);
+
+        if (existingMatchesError) {
+          throw new Error(existingMatchesError.message);
+        }
+
+        existingMatchMap = new Map<string, string>(
+          ((existingMatches as UpsertedMatchRow[]) ?? []).map((row) => [row.source_url, row.id])
+        );
+
+        const currentSourceUrls = new Set(importRows.map((row) => row.source_url));
+        const { data: competitionMatches, error: competitionMatchesError } = await supabase
+          .from("matches")
+          .select("id,source_url")
+          .eq("source", "FPF")
+          .eq("competition_name", competition.name)
+          .eq("season_year", competition.season_year);
+
+        if (competitionMatchesError) {
+          throw new Error(competitionMatchesError.message);
+        }
+
+        const staleMatchIds = ((competitionMatches as UpsertedMatchRow[]) ?? [])
+          .filter((row) => !currentSourceUrls.has(row.source_url))
+          .map((row) => row.id);
+
+        if (staleMatchIds.length > 0) {
+          const { error: deleteStaleMatchesError } = await supabase.from("matches").delete().in("id", staleMatchIds);
+          if (deleteStaleMatchesError) {
+            throw new Error(deleteStaleMatchesError.message);
+          }
+        }
+      }
 
       if (currentState?.last_hash === stateHash) {
+        if (importRows.length > 0) {
+          const finishedTargets = Array.from(
+            new Map(
+              importRows
+                .filter((row) => row.match_date <= todayIso)
+                .map((row) => {
+                  const matchId = existingMatchMap.get(row.source_url) ?? null;
+                  const sumulaUrl = sumulaUrlBySourceUrl.get(row.source_url) ?? null;
+                  return matchId && sumulaUrl ? [matchId, { matchId, sumulaUrl }] : null;
+                })
+                .filter((entry): entry is [string, { matchId: string; sumulaUrl: string }] => entry !== null)
+            ).values()
+          );
+
+          const reportsResult = await syncFinishedReportsForMatches(supabase, finishedTargets);
+          reportsSynced += reportsResult.reportsSynced;
+          reportsFailed += reportsResult.reportsFailed;
+        }
+
         const { error: touchStateError } = await supabase.from("sync_state").upsert({
           competition_id: competition.id,
           last_hash: stateHash,
@@ -403,18 +510,50 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
       }
 
       if (importRows.length > 0) {
-        const { data: upsertedMatches, error: upsertError } = await supabase
-          .from("matches")
-          .upsert(importRows, {
-            onConflict: "source,source_url",
-          })
-          .select("id,source_url");
+        const newRows = importRows.filter((row) => !existingMatchMap.has(row.source_url));
+        const updateRows = importRows
+          .map((row) => ({
+            id: existingMatchMap.get(row.source_url) ?? null,
+            row,
+          }))
+          .filter((entry): entry is { id: string; row: MatchImportRow } => !!entry.id);
 
-        if (upsertError) {
-          throw new Error(upsertError.message);
+        const importedMatchRows: UpsertedMatchRow[] = [];
+
+        if (newRows.length > 0) {
+          const { data: insertedMatches, error: insertError } = await supabase
+            .from("matches")
+            .insert(newRows)
+            .select("id,source_url,home");
+
+          if (insertError) {
+            throw new Error(insertError.message);
+          }
+
+          const inserted = (insertedMatches as UpsertedMatchRow[]) ?? [];
+          for (const row of inserted) {
+            existingMatchMap.set(row.source_url, row.id);
+          }
+          importedMatchRows.push(...inserted);
         }
 
-        const importedMatchRows = (upsertedMatches as UpsertedMatchRow[]) ?? [];
+        for (const entry of updateRows) {
+          const { error: updateError } = await supabase
+            .from("matches")
+            .update(entry.row)
+            .eq("id", entry.id);
+
+          if (updateError) {
+            throw new Error(updateError.message);
+          }
+
+          existingMatchMap.set(entry.row.source_url, entry.id);
+          importedMatchRows.push({
+            id: entry.id,
+            source_url: entry.row.source_url,
+            home: entry.row.home,
+          });
+        }
 
         if (importedMatchRows.length > 0 && mockSeeds.length > 0) {
           const { rows: statRows, pendingPayloads, linkedCount } = await buildMockStatsRowsForMatches(
@@ -469,6 +608,23 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
           playersLinked += linkedCount;
         }
 
+        const finishedTargets = Array.from(
+          new Map(
+            importRows
+              .filter((row) => row.match_date <= todayIso)
+              .map((row) => {
+                const matchId = existingMatchMap.get(row.source_url) ?? null;
+                const sumulaUrl = sumulaUrlBySourceUrl.get(row.source_url) ?? null;
+                return matchId && sumulaUrl ? [matchId, { matchId, sumulaUrl }] : null;
+              })
+              .filter((entry): entry is [string, { matchId: string; sumulaUrl: string }] => entry !== null)
+          ).values()
+        );
+
+        const reportsResult = await syncFinishedReportsForMatches(supabase, finishedTargets);
+        reportsSynced += reportsResult.reportsSynced;
+        reportsFailed += reportsResult.reportsFailed;
+
         matchesImported += importRows.length;
       }
 
@@ -501,6 +657,8 @@ export async function runMatchesSync(): Promise<{ syncRun: SyncRunRow; summary: 
       details_failed: detailsFailed,
       matches_updated_with_score: matchesUpdatedWithScore,
       players_linked: playersLinked,
+      reports_synced: reportsSynced,
+      reports_failed: reportsFailed,
     };
 
     const { data: doneRun, error: doneError } = await supabase

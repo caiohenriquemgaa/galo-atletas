@@ -1,14 +1,12 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { supabase } from "@/lib/supabase/client";
-import { downloadCsv } from "@/lib/export/csv";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,6 +15,9 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
+import { getAthleteSuspensionHistory, getNextMatchSuspensions, type SuspensionMatchInfo } from "@/lib/analytics/suspension";
+import { downloadCsv } from "@/lib/export/csv";
+import { supabase } from "@/lib/supabase/client";
 
 type Athlete = {
   id: string;
@@ -32,18 +33,10 @@ type Athlete = {
   is_active_fpf: boolean | null;
 };
 
-type MatchInfo = {
-  id: string;
-  competition_name: string;
-  season_year: number;
-  match_date: string;
-  opponent: string;
-  home: boolean;
-  goals_for: number;
-  goals_against: number;
-};
+type MatchInfo = SuspensionMatchInfo;
 
 type AthleteStatRow = {
+  source: string;
   minutes: number;
   goals: number;
   assists: number;
@@ -67,7 +60,7 @@ type ChartPoint = {
 };
 
 const athleteSchema = z.object({
-  name: z.string().trim().min(1, "Nome é obrigatório."),
+  name: z.string().trim().min(1, "Nome e obrigatorio."),
   nickname: z.string().optional(),
   position: z.string().optional(),
   dob: z.string().optional(),
@@ -102,6 +95,12 @@ function pickMatch(match: AthleteStatRow["match"]): MatchInfo | null {
   return Array.isArray(match) ? (match[0] ?? null) : match;
 }
 
+function isCompletedAthleteStatRow(row: AthleteStatRow & { match: MatchInfo | null }) {
+  if (!row.match) return false;
+  if (row.source !== "MOCK") return true;
+  return row.minutes > 0 || row.match.goals_for !== null || row.match.goals_against !== null;
+}
+
 function sanitizeFilename(value: string) {
   return value
     .normalize("NFD")
@@ -111,26 +110,14 @@ function sanitizeFilename(value: string) {
     .toLowerCase();
 }
 
-function calculatePerformanceScore({
-  totalMinutes,
-  totalGoals,
-  totalAssists,
-  totalYellow,
-  totalRed,
-}: {
+function calculatePerformanceScore(input: {
   totalMinutes: number;
   totalGoals: number;
   totalAssists: number;
   totalYellow: number;
   totalRed: number;
 }) {
-  const scoreBase =
-    totalMinutes / 90 +
-    totalGoals * 5 +
-    totalAssists * 3 -
-    totalYellow * 1 -
-    totalRed * 3;
-
+  const scoreBase = input.totalMinutes / 90 + input.totalGoals * 5 + input.totalAssists * 3 - input.totalYellow * 1 - input.totalRed * 3;
   return Math.max(0, Math.min(100, Math.round(scoreBase)));
 }
 
@@ -155,6 +142,7 @@ export default function AthleteProfilePage() {
   const [error, setError] = useState<string | null>(null);
   const [athlete, setAthlete] = useState<Athlete | null>(null);
   const [statsRows, setStatsRows] = useState<AthleteStatRow[]>([]);
+  const [matches, setMatches] = useState<MatchInfo[]>([]);
   const [exporting, setExporting] = useState(false);
 
   const form = useForm<AthleteFormValues>({
@@ -182,22 +170,28 @@ export default function AthleteProfilePage() {
           .single<Athlete>();
 
         if (athleteError || !athleteData) {
-          setError("Não foi possível carregar o atleta.");
+          setError("Nao foi possivel carregar o atleta.");
           setLoading(false);
           return;
         }
 
-        const { data: statsData, error: statsError } = await supabase
-          .from("match_player_stats")
-          .select(
-            "minutes,goals,assists,yellow_cards,red_cards, match:matches(id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against)"
-          )
-          .eq("athlete_id", athleteId)
-          .order("created_at", { ascending: false })
-          .limit(15);
+        const [{ data: statsData, error: statsError }, { data: matchesData, error: matchesError }] = await Promise.all([
+          supabase
+            .from("match_player_stats")
+            .select(
+              "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against)"
+            )
+            .eq("athlete_id", athleteId)
+            .order("created_at", { ascending: false })
+            .limit(1000),
+          supabase
+            .from("matches")
+            .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against")
+            .order("match_date", { ascending: false }),
+        ]);
 
-        if (statsError) {
-          setError("Não foi possível carregar estatísticas do atleta.");
+        if (statsError || matchesError) {
+          setError("Nao foi possivel carregar estatisticas do atleta.");
           setLoading(false);
           return;
         }
@@ -210,6 +204,7 @@ export default function AthleteProfilePage() {
           dob: athleteData.dob ?? "",
         });
         setStatsRows((statsData as AthleteStatRow[]) ?? []);
+        setMatches((matchesData as MatchInfo[]) ?? []);
         setLoading(false);
       })();
     });
@@ -222,12 +217,20 @@ export default function AthleteProfilePage() {
           ...row,
           match: pickMatch(row.match),
         }))
-        .filter((row) => row.match !== null),
+        .filter((row) => isCompletedAthleteStatRow(row)),
     [statsRows]
   );
 
+  const recentRows = useMemo(
+    () =>
+      [...normalizedRows]
+        .sort((a, b) => new Date(b.match!.match_date).getTime() - new Date(a.match!.match_date).getTime())
+        .slice(0, 15),
+    [normalizedRows]
+  );
+
   const kpis = useMemo<Kpis>(() => {
-    return normalizedRows.reduce(
+    return recentRows.reduce(
       (acc, row) => ({
         games: acc.games + 1,
         minutes: acc.minutes + (row.minutes ?? 0),
@@ -238,16 +241,16 @@ export default function AthleteProfilePage() {
       }),
       { games: 0, minutes: 0, goals: 0, assists: 0, yellow: 0, red: 0 }
     );
-  }, [normalizedRows]);
+  }, [recentRows]);
 
   const chartData = useMemo<ChartPoint[]>(() => {
-    return [...normalizedRows]
+    return [...recentRows]
       .sort((a, b) => new Date(a.match!.match_date).getTime() - new Date(b.match!.match_date).getTime())
       .map((row) => ({
         label: toShortDate(row.match!.match_date),
         minutes: row.minutes ?? 0,
       }));
-  }, [normalizedRows]);
+  }, [recentRows]);
 
   const performanceScore = useMemo(
     () =>
@@ -261,10 +264,7 @@ export default function AthleteProfilePage() {
     [kpis]
   );
 
-  const scoreClassification = useMemo(
-    () => getScoreClassification(performanceScore),
-    [performanceScore]
-  );
+  const scoreClassification = useMemo(() => getScoreClassification(performanceScore), [performanceScore]);
 
   const scoreBadgeClass = useMemo(() => {
     if (scoreClassification.color === "red") {
@@ -279,6 +279,52 @@ export default function AthleteProfilePage() {
     return "border-sky-500/35 bg-sky-500/15 text-sky-300";
   }, [scoreClassification.color]);
 
+  const nextMatchSuspensions = useMemo(
+    () =>
+      getNextMatchSuspensions({
+        matches,
+        statsRows: normalizedRows.map((row) => ({
+          athlete_id: athleteId ?? null,
+          yellow_cards: row.yellow_cards ?? 0,
+          red_cards: row.red_cards ?? 0,
+          match: row.match,
+        })),
+      }),
+    [athleteId, matches, normalizedRows]
+  );
+
+  const athleteSuspensionAlert = useMemo(
+    () => nextMatchSuspensions.alerts.find((alert) => alert.athleteId === athleteId) ?? null,
+    [athleteId, nextMatchSuspensions.alerts]
+  );
+
+  const suspensionHistoryResult = useMemo(
+    () =>
+      athleteId
+        ? getAthleteSuspensionHistory({
+            athleteId,
+            matches,
+            statsRows: normalizedRows.map((row) => ({
+              athlete_id: athleteId,
+              yellow_cards: row.yellow_cards ?? 0,
+              red_cards: row.red_cards ?? 0,
+              match: row.match,
+            })),
+          })
+        : { supported: false, history: [] },
+    [athleteId, matches, normalizedRows]
+  );
+
+  const servedSuspensionHistory = useMemo(
+    () => suspensionHistoryResult.history.filter((item) => item.status === "served"),
+    [suspensionHistoryResult.history]
+  );
+
+  const pendingSuspensionHistory = useMemo(
+    () => suspensionHistoryResult.history.filter((item) => item.status === "pending"),
+    [suspensionHistoryResult.history]
+  );
+
   async function handleExportAthleteCsv() {
     if (!athleteId || !athlete) return;
 
@@ -287,7 +333,7 @@ export default function AthleteProfilePage() {
     const { data: exportData, error: exportError } = await supabase
       .from("match_player_stats")
       .select(
-        "minutes,goals,assists,yellow_cards,red_cards, match:matches(match_date,opponent,home,goals_for,goals_against,competition_name,season_year,id)"
+        "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(match_date,opponent,home,goals_for,goals_against,competition_name,season_year,id)"
       )
       .eq("athlete_id", athleteId)
       .limit(1000);
@@ -295,8 +341,8 @@ export default function AthleteProfilePage() {
     if (exportError) {
       toast({
         variant: "destructive",
-        title: "Erro na exportação",
-        description: "Não foi possível gerar o CSV do atleta.",
+        title: "Erro na exportacao",
+        description: "Nao foi possivel gerar o CSV do atleta.",
       });
       setExporting(false);
       return;
@@ -304,7 +350,7 @@ export default function AthleteProfilePage() {
 
     const rows = ((exportData as AthleteStatRow[]) ?? [])
       .map((row) => ({ ...row, match: pickMatch(row.match) }))
-      .filter((row) => row.match !== null)
+      .filter((row) => isCompletedAthleteStatRow(row))
       .sort((a, b) => new Date(b.match!.match_date).getTime() - new Date(a.match!.match_date).getTime());
 
     const totals = rows.reduce(
@@ -377,7 +423,7 @@ export default function AthleteProfilePage() {
       toast({
         variant: "destructive",
         title: "Erro ao salvar",
-        description: "Não foi possível atualizar o atleta.",
+        description: "Nao foi possivel atualizar o atleta.",
       });
       return;
     }
@@ -413,13 +459,13 @@ export default function AthleteProfilePage() {
       toast({
         variant: "destructive",
         title: "Erro ao excluir",
-        description: "Não foi possível excluir o atleta.",
+        description: "Nao foi possivel excluir o atleta.",
       });
       return;
     }
 
     toast({
-      title: "Atleta excluído",
+      title: "Atleta excluido",
       description: "Registro removido com sucesso.",
     });
 
@@ -431,7 +477,7 @@ export default function AthleteProfilePage() {
     return (
       <Card>
         <CardContent className="p-6">
-          <p className="text-sm text-red-400">ID de atleta inválido.</p>
+          <p className="text-sm text-red-400">ID de atleta invalido.</p>
         </CardContent>
       </Card>
     );
@@ -442,7 +488,7 @@ export default function AthleteProfilePage() {
   }
 
   if (error || !athlete) {
-    return <p className="text-sm text-red-400">{error ?? "Atleta não encontrado."}</p>;
+    return <p className="text-sm text-red-400">{error ?? "Atleta nao encontrado."}</p>;
   }
 
   return (
@@ -451,24 +497,30 @@ export default function AthleteProfilePage() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">{athlete.name}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge>{athlete.position || "Sem posição"}</Badge>
+            <Badge>{athlete.position || "Sem posicao"}</Badge>
             {athlete.nickname && <Badge variant="outline">{athlete.nickname}</Badge>}
             {athlete.source === "FPF" && <Badge>FPF</Badge>}
             {athlete.source === "FPF" && (
               <Badge variant={athlete.is_active_fpf === false ? "destructive" : "success"}>
-                {athlete.is_active_fpf === false ? "Não habilitado" : "Habilitado"}
+                {athlete.is_active_fpf === false ? "Nao habilitado" : "Habilitado"}
               </Badge>
             )}
             <Badge variant="success">Perfil do Atleta</Badge>
+            {nextMatchSuspensions.supported && nextMatchSuspensions.nextMatch && athleteSuspensionAlert && (
+              <Badge variant="destructive">Suspenso proximo jogo</Badge>
+            )}
+            {nextMatchSuspensions.supported && nextMatchSuspensions.nextMatch && !athleteSuspensionAlert && (
+              <Badge variant="success">Liberado proximo jogo</Badge>
+            )}
           </div>
           <div className="mt-3 flex flex-wrap gap-6 text-sm text-[var(--muted)]">
             <p>
               <span className="mr-1 text-xs uppercase tracking-wide">Registro CBF</span>
-              <span className="text-white">{athlete.cbf_registry || "—"}</span>
+              <span className="text-white">{athlete.cbf_registry || "-"}</span>
             </p>
             <p>
               <span className="mr-1 text-xs uppercase tracking-wide">Habilitado em</span>
-              <span className="text-white">{athlete.habilitation_date ? toShortDateOrDash(athlete.habilitation_date) : "—"}</span>
+              <span className="text-white">{athlete.habilitation_date ? toShortDateOrDash(athlete.habilitation_date) : "-"}</span>
             </p>
           </div>
         </div>
@@ -485,7 +537,7 @@ export default function AthleteProfilePage() {
 
       <Tabs defaultValue="overview">
         <TabsList>
-          <TabsTrigger value="overview">Visão Geral</TabsTrigger>
+          <TabsTrigger value="overview">Visao Geral</TabsTrigger>
           <TabsTrigger value="edit">Editar</TabsTrigger>
         </TabsList>
 
@@ -493,7 +545,7 @@ export default function AthleteProfilePage() {
           <Card>
             <CardHeader>
               <CardTitle>Dados cadastrais</CardTitle>
-              <CardDescription>Informações de origem e habilitação do atleta.</CardDescription>
+              <CardDescription>Informacoes de origem e habilitacao do atleta.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -502,7 +554,7 @@ export default function AthleteProfilePage() {
                   <p className="text-sm font-medium">{athlete.cbf_registry || "-"}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-[var(--muted)]">Data habilitação</p>
+                  <p className="text-xs text-[var(--muted)]">Data habilitacao</p>
                   <p className="text-sm font-medium">{toShortDateOrDash(athlete.habilitation_date)}</p>
                 </div>
                 <div>
@@ -512,20 +564,108 @@ export default function AthleteProfilePage() {
                 <div>
                   <p className="text-xs text-[var(--muted)]">Status habilitado</p>
                   <p className="text-sm font-medium">
-                    {athlete.source === "FPF"
-                      ? athlete.is_active_fpf === false
-                        ? "Não habilitado"
-                        : "Habilitado"
-                      : "Não se aplica"}
+                    {athlete.source === "FPF" ? (athlete.is_active_fpf === false ? "Nao habilitado" : "Habilitado") : "Nao se aplica"}
                   </p>
                 </div>
               </div>
             </CardContent>
           </Card>
 
+          {nextMatchSuspensions.supported && nextMatchSuspensions.nextMatch && (
+            <Card className={athleteSuspensionAlert ? "border-red-500/30 bg-red-950/10" : "border-emerald-500/30 bg-emerald-950/10"}>
+              <CardHeader>
+                <CardTitle>{athleteSuspensionAlert ? "Alerta individual de suspensao" : "Status para o proximo jogo"}</CardTitle>
+                <CardDescription>
+                  Proximo jogo: {toLongDate(nextMatchSuspensions.nextMatch.match_date)} • {toHomeAwayLabel(nextMatchSuspensions.nextMatch.home)} •{" "}
+                  {nextMatchSuspensions.nextMatch.opponent}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {athleteSuspensionAlert ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="destructive">{athleteSuspensionAlert.reason}</Badge>
+                    <Badge variant="outline">{athleteSuspensionAlert.yellowCountInCycle} amarelo(s) no ciclo</Badge>
+                  </div>
+                ) : (
+                  <Badge variant="success">Liberado para o proximo jogo</Badge>
+                )}
+                <p className="text-sm text-[var(--muted)]">
+                  Criterio REC 2026: suspensao automatica por cartao vermelho ou 3o amarelo; os amarelos zeram ao fim da 1a e da 3a fases.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {suspensionHistoryResult.supported && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Historico de suspensoes</CardTitle>
+                <CardDescription>Mostra em qual partida a suspensao foi gerada e em qual jogo seguinte ela foi cumprida.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {pendingSuspensionHistory.length > 0 && (
+                  <div className="space-y-2">
+                    {pendingSuspensionHistory.map((item) => (
+                      <div key={`pending-${item.triggerMatch.id}`} className="rounded-lg border border-red-500/25 bg-red-500/10 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant="destructive">Suspensao pendente</Badge>
+                          <Badge variant="outline">{item.reason}</Badge>
+                          <Badge variant="outline">{item.yellowCountInCycle} amarelo(s) no ciclo</Badge>
+                        </div>
+                        <p className="mt-2 text-sm text-[var(--muted)]">
+                          Gerada em{" "}
+                          <Link href={`/matches/${item.triggerMatch.id}`} className="text-white hover:text-[var(--gold)]">
+                            {toLongDate(item.triggerMatch.match_date)} contra {item.triggerMatch.opponent}
+                          </Link>
+                          . Deve ser cumprida em{" "}
+                          <Link href={`/matches/${item.targetMatch.id}`} className="text-white hover:text-[var(--gold)]">
+                            {toLongDate(item.targetMatch.match_date)} contra {item.targetMatch.opponent}
+                          </Link>
+                          .
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {servedSuspensionHistory.length === 0 ? (
+                  pendingSuspensionHistory.length === 0 ? (
+                    <p className="text-sm text-[var(--muted)]">Nenhuma suspensao automatica registrada para este atleta.</p>
+                  ) : null
+                ) : (
+                  <div className="space-y-2">
+                    {servedSuspensionHistory
+                      .slice()
+                      .reverse()
+                      .map((item) => (
+                        <div key={`served-${item.triggerMatch.id}`} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="success">Suspensao cumprida</Badge>
+                            <Badge variant="outline">{item.reason}</Badge>
+                            <Badge variant="outline">{item.yellowCountInCycle} amarelo(s) no ciclo</Badge>
+                          </div>
+                          <p className="mt-2 text-sm text-[var(--muted)]">
+                            Motivo registrado em{" "}
+                            <Link href={`/matches/${item.triggerMatch.id}`} className="text-white hover:text-[var(--gold)]">
+                              {toLongDate(item.triggerMatch.match_date)} contra {item.triggerMatch.opponent}
+                            </Link>
+                            . Suspensao cumprida em{" "}
+                            <Link href={`/matches/${item.targetMatch.id}`} className="text-white hover:text-[var(--gold)]">
+                              {toLongDate(item.targetMatch.match_date)} contra {item.targetMatch.opponent}
+                            </Link>
+                            .
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
             <CardHeader className="pb-3">
-              <CardDescription>Indicador consolidado dos últimos jogos</CardDescription>
+              <CardDescription>Indicador consolidado dos ultimos jogos</CardDescription>
               <div className="flex flex-wrap items-center gap-3">
                 <CardTitle className="text-4xl">{performanceScore}</CardTitle>
                 <Badge className={scoreBadgeClass}>{scoreClassification.label}</Badge>
@@ -533,14 +673,9 @@ export default function AthleteProfilePage() {
             </CardHeader>
             <CardContent>
               <div className="h-3 w-full overflow-hidden rounded-full bg-white/10">
-                <div
-                  className="h-full rounded-full bg-[var(--gold)] transition-all duration-700 ease-out"
-                  style={{ width: `${performanceScore}%` }}
-                />
+                <div className="h-full rounded-full bg-[var(--gold)] transition-all duration-700 ease-out" style={{ width: `${performanceScore}%` }} />
               </div>
-              <p className="mt-2 text-xs text-[var(--muted)]">
-                Score de 0 a 100 baseado em minutos, gols, assistências e cartões.
-              </p>
+              <p className="mt-2 text-xs text-[var(--muted)]">Score de 0 a 100 baseado em minutos, gols, assistencias e cartoes.</p>
             </CardContent>
           </Card>
 
@@ -565,7 +700,7 @@ export default function AthleteProfilePage() {
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Assistências</CardDescription>
+                <CardDescription>Assistencias</CardDescription>
                 <CardTitle className="text-3xl">{kpis.assists}</CardTitle>
               </CardHeader>
             </Card>
@@ -586,11 +721,11 @@ export default function AthleteProfilePage() {
           <Card>
             <CardHeader>
               <CardTitle>Minutos por jogo</CardTitle>
-              <CardDescription>Últimos 15 jogos do atleta.</CardDescription>
+              <CardDescription>Ultimos 15 jogos do atleta.</CardDescription>
             </CardHeader>
             <CardContent className="h-[320px]">
               {chartData.length === 0 ? (
-                <p className="text-sm text-[var(--muted)]">Sem jogos suficientes para o gráfico.</p>
+                <p className="text-sm text-[var(--muted)]">Sem jogos suficientes para o grafico.</p>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData}>
@@ -615,19 +750,19 @@ export default function AthleteProfilePage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Últimos jogos</CardTitle>
+              <CardTitle>Ultimos jogos</CardTitle>
               <CardDescription>Desempenho individual recente.</CardDescription>
             </CardHeader>
             <CardContent>
-              {normalizedRows.length === 0 ? (
+              {recentRows.length === 0 ? (
                 <p className="text-sm text-[var(--muted)]">Sem jogos registrados para este atleta.</p>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Data</TableHead>
-                      <TableHead>Competição</TableHead>
-                      <TableHead>Adversário</TableHead>
+                      <TableHead>Competicao</TableHead>
+                      <TableHead>Adversario</TableHead>
                       <TableHead>Local</TableHead>
                       <TableHead>Placar</TableHead>
                       <TableHead className="text-right">Min</TableHead>
@@ -638,7 +773,7 @@ export default function AthleteProfilePage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {normalizedRows.map((row, index) => (
+                    {recentRows.map((row, index) => (
                       <TableRow key={`${row.match!.id}-${index}`}>
                         <TableCell>
                           <Link href={`/matches/${row.match!.id}`} className="font-medium hover:text-[var(--gold)]">
@@ -707,7 +842,7 @@ export default function AthleteProfilePage() {
                     name="position"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Posição</FormLabel>
+                        <FormLabel>Posicao</FormLabel>
                         <FormControl>
                           <Input placeholder="Ex: Lateral" {...field} />
                         </FormControl>

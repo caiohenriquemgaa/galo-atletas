@@ -24,12 +24,15 @@ type Athlete = {
 type MatchMeta = {
   competition_name: string;
   season_year: number;
+  goals_for: number | null;
+  goals_against: number | null;
 };
 
 type MatchRelation = MatchMeta | MatchMeta[] | null;
 
 type StatsExportRow = {
   athlete_id: string;
+  source: string | null;
   minutes: number;
   goals: number;
   assists: number;
@@ -41,6 +44,12 @@ type StatsExportRow = {
 function pickMatch(match: MatchRelation): MatchMeta | null {
   if (!match) return null;
   return Array.isArray(match) ? (match[0] ?? null) : match;
+}
+
+function isCompletedStatsExportRow(row: StatsExportRow & { match: MatchMeta | null }) {
+  if (!row.match) return false;
+  if (row.source !== "MOCK") return true;
+  return (row.minutes ?? 0) > 0 || row.match.goals_for !== null || row.match.goals_against !== null;
 }
 
 export default function AthletesPage() {
@@ -125,7 +134,7 @@ export default function AthletesPage() {
 
     const { data: statsData, error: statsError } = await supabase
       .from("match_player_stats")
-      .select("minutes,goals,assists,yellow_cards,red_cards,athlete_id,match:matches(competition_name,season_year)");
+      .select("source,minutes,goals,assists,yellow_cards,red_cards,athlete_id,match:matches(competition_name,season_year,goals_for,goals_against)");
 
     if (statsError) {
       toast({
@@ -157,21 +166,26 @@ export default function AthletesPage() {
     const statRows = (statsData as StatsExportRow[]) ?? [];
 
     for (const row of statRows) {
-      const match = pickMatch(row.match);
-      if (!match) continue;
+      const normalizedRow = {
+        ...row,
+        match: pickMatch(row.match),
+      };
+
+      const match = normalizedRow.match;
+      if (!isCompletedStatsExportRow(normalizedRow)) continue;
 
       if (competitionFilter !== "ALL" && match.competition_name !== competitionFilter) continue;
       if (seasonFilter !== "ALL" && String(match.season_year) !== seasonFilter) continue;
 
-      const target = byAthleteId[row.athlete_id];
+      const target = byAthleteId[normalizedRow.athlete_id];
       if (!target) continue;
 
       target.games += 1;
-      target.minutes += row.minutes ?? 0;
-      target.goals += row.goals ?? 0;
-      target.assists += row.assists ?? 0;
-      target.yellow_cards += row.yellow_cards ?? 0;
-      target.red_cards += row.red_cards ?? 0;
+      target.minutes += normalizedRow.minutes ?? 0;
+      target.goals += normalizedRow.goals ?? 0;
+      target.assists += normalizedRow.assists ?? 0;
+      target.yellow_cards += normalizedRow.yellow_cards ?? 0;
+      target.red_cards += normalizedRow.red_cards ?? 0;
     }
 
     const csvRows = athletesBase.map((athlete) => ({

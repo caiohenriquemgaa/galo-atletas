@@ -30,10 +30,11 @@ export type FpfMatchDetails = {
   referee?: string;
   home_team?: string;
   away_team?: string;
+  sumula_url?: string;
 };
 
 const SCORE_EXACT_REGEX = /^\s*\d{1,2}\s*[x×]\s*\d{1,2}\s*$/;
-const SCORE_CAPTURE_REGEX = /(\d{1,2})\s*[x×]\s*(\d{1,2})/;
+const SCORE_CAPTURE_REGEX = /(\d{1,2})\s*[x×]\s*(\d{1,2})/i;
 const BANNED_TEAM_WORDS = ["federacao", "cookies", "diretoria", "menu", "politica"];
 
 type ParsedLine = {
@@ -55,7 +56,7 @@ function normalizeText(value: string) {
 
 function cleanTeamName(value: string) {
   return value
-    .replace(/\b(SOBRE O JOGO|ESTADIO|ESTÁDIO|LOCAL|RODADA|HORARIO|HORÁRIO|HORA|DATA|ARBITRO|ÁRBITRO|ARBITRAGEM)\b/gi, " ")
+    .replace(/\b(SOBRE O JOGO|ESTADIO|EST[AÁ]DIO|LOCAL|RODADA|HORARIO|HOR[AÁ]RIO|HORA|DATA|ARBITRO|[AÁ]RBITRO|ARBITRAGEM)\b/gi, " ")
     .replace(/[0-9]{1,2}\s*[x×]\s*[0-9]{1,2}/g, " ")
     .replace(/\d{2}\/\d{2}(?:\/\d{4})?/g, " ")
     .replace(/\d{1,2}:\d{2}/g, " ")
@@ -89,7 +90,7 @@ function parseDate(raw: string, fallbackYear: number): Date | null {
 }
 
 function parseScore(raw: string): { goalsHome: number | null; goalsAway: number | null } {
-  const scoreMatch = raw.match(/(\d+)\s*[x×]\s*(\d+)/i);
+  const scoreMatch = raw.match(SCORE_CAPTURE_REGEX);
   if (!scoreMatch) return { goalsHome: null, goalsAway: null };
 
   return {
@@ -99,24 +100,12 @@ function parseScore(raw: string): { goalsHome: number | null; goalsAway: number 
 }
 
 function parseTeams(raw: string): { homeTeam: string; awayTeam: string } | null {
-  let working = raw.replace(/\s+/g, " ").trim();
-  working = working.replace(/\bSOBRE O JOGO\b/gi, " ");
-  working = working.replace(/\b\d{1,2}\s*[x×]\s*\d{1,2}\b/g, " ");
-  working = working.replace(/\b\d{2}\/\d{2}(?:\/\d{4})?\b/g, " ");
-  working = working.replace(/\b\d{1,2}:\d{2}\b/g, " ");
-  working = working.replace(/\s+/g, " ").trim();
+  const working = raw.replace(/\s+/g, " ").trim();
+  const matchupMatch = working.match(/^(.*?)\s+(?:(\d{1,2})\s*)?[x×]\s*(?:(\d{1,2})\s+)?(.*?)$/i);
+  if (!matchupMatch) return null;
 
-  const splitMatch = /\s([x×])\s/i.exec(working);
-  if (!splitMatch || splitMatch.index < 0) return null;
-
-  const separator = splitMatch[0];
-  const leftRaw = working.slice(0, splitMatch.index).trim();
-  const rightRaw = working.slice(splitMatch.index + separator.length).trim();
-
-  if (!leftRaw || !rightRaw) return null;
-
-  const left = cleanTeamName(leftRaw.split(/(?:\||•| - )/).pop() ?? "");
-  const right = cleanTeamName(rightRaw.split(/(?:\||•| - )/)[0] ?? "");
+  const left = cleanTeamName(matchupMatch[1] ?? "");
+  const right = cleanTeamName(matchupMatch[4] ?? "");
 
   if (!/[A-Za-zÀ-ÿ]/.test(left) || !/[A-Za-zÀ-ÿ]/.test(right)) return null;
   if (left.length > 80 || right.length > 80) return null;
@@ -148,16 +137,26 @@ function deriveMetaFromPage(urlBase: string, title: string) {
 function parseLine(text: string, fallbackYear: number): ParsedLine | null {
   const compact = text.replace(/\s+/g, " ").trim();
   if (!compact) return null;
-
   if (!/[x×]/i.test(compact)) return null;
 
   const date = parseDate(compact, fallbackYear);
   if (!date) return null;
 
-  const teams = parseTeams(compact);
+  const dateMatch = compact.match(/\d{2}\/\d{2}(?:\/\d{4})?/);
+  if (!dateMatch || dateMatch.index === undefined) return null;
+
+  let descriptor = compact.slice(dateMatch.index + dateMatch[0].length).trim();
+  descriptor = descriptor.replace(/^[\s|•\-–—]+/u, "");
+  descriptor = descriptor.replace(/^(SEG|TER|QUA|QUI|SEX|SAB|SÁB|DOM)\b\.?/iu, "");
+  descriptor = descriptor.replace(/^[\s|•\-–—]+/u, "");
+  descriptor = descriptor.replace(/^\d{1,2}:\d{2}\b/u, "");
+  descriptor = descriptor.replace(/^[\s|•\-–—]+/u, "");
+  descriptor = descriptor.replace(/\bSOBRE O JOGO\b.*$/iu, "").trim();
+
+  const teams = parseTeams(descriptor);
   if (!teams) return null;
 
-  const score = parseScore(compact);
+  const score = parseScore(descriptor);
 
   return {
     match_date: date,
@@ -209,17 +208,13 @@ function extractLabeledSibling(
   root: ReturnType<ReturnType<typeof load>>,
   labels: string[]
 ) {
-  const nodes = root
-    .find("label,strong,b,span,p,dt,th,td")
-    .toArray();
+  const nodes = root.find("label,strong,b,span,p,dt,th,td").toArray();
 
   for (const node of nodes) {
     const labelText = sanitizeText($(node).text());
     if (!labelText) continue;
 
-    const matchesLabel = labels.some((label) =>
-      normalizeText(labelText).includes(normalizeText(label))
-    );
+    const matchesLabel = labels.some((label) => normalizeText(labelText).includes(normalizeText(label)));
     if (!matchesLabel) continue;
 
     const siblingText = sanitizeText($(node).next().text());
@@ -249,7 +244,9 @@ function pickRowFromLink($: ReturnType<typeof load>, link: AnyNode) {
 }
 
 function hasTeamsContext(text: string) {
-  return /[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}\s*[x×]\s*[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}/i.test(text);
+  return /[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}\s+(?:\d{1,2}\s*)?[x×]\s*(?:\d{1,2}\s+)?[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s.'-]{1,60}/i.test(
+    text
+  );
 }
 
 export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDetails> {
@@ -268,6 +265,11 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
 
     const html = await response.text();
     const $ = load(html);
+    const sumula_url =
+      absoluteUrl(
+        detailsUrl,
+        $('a[href*="/download/sumula/"], a.zabmcbf-documento-link').first().attr("href") ?? null
+      ) ?? undefined;
     const scoreElements = $("section,div,span,p,strong,h1,h2,h3,h4,h5,h6,td")
       .filter((_, el) => SCORE_EXACT_REGEX.test(sanitizeText($(el).text())))
       .toArray();
@@ -289,11 +291,9 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
           pushUniqueShortText(candidates, $(node).text(), 50);
         });
 
-      scoreBlock
-        .find("h1,h2,h3,h4,h5,h6,p,span,strong,a,td")
-        .each((_, node) => {
-          pushUniqueShortText(candidates, $(node).text(), 50);
-        });
+      scoreBlock.find("h1,h2,h3,h4,h5,h6,p,span,strong,a,td").each((_, node) => {
+        pushUniqueShortText(candidates, $(node).text(), 50);
+      });
 
       const teamCandidates = candidates.filter(isValidTeamCandidate).slice(0, 6);
       if (teamCandidates.length < 2) continue;
@@ -308,11 +308,9 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
       const kickoffTimeMatch = blockText.match(/\b\d{2}:\d{2}\b/);
 
       const venue =
-        extractLabeledSibling($, scoreBlock, ["Estádio", "Estadio", "Local"])?.slice(0, 100) ??
-        undefined;
+        extractLabeledSibling($, scoreBlock, ["Estadio", "Estádio", "Local"])?.slice(0, 100) ?? undefined;
       const referee =
-        extractLabeledSibling($, scoreBlock, ["Árbitro", "Arbitro", "Arbitragem"])?.slice(0, 100) ??
-        undefined;
+        extractLabeledSibling($, scoreBlock, ["Arbitro", "Árbitro", "Arbitragem"])?.slice(0, 100) ?? undefined;
 
       return {
         goals_home: Number.parseInt(scoreMatch[1], 10),
@@ -322,10 +320,13 @@ export async function fetchMatchDetails(detailsUrl: string): Promise<FpfMatchDet
         referee,
         home_team: homeTeam,
         away_team: awayTeam,
+        sumula_url,
       };
     }
 
-    return {};
+    return {
+      sumula_url,
+    };
   } catch {
     return {};
   }
@@ -357,54 +358,52 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
   let candidates_discarded_too_long = 0;
   let rows_with_x_found = 0;
 
-  // Strategy A: row text around links exactly "SOBRE O JOGO"
   const aboutLinks = $("a")
-    .filter((_, el) => normalizeText($(el).text()) === "SOBRE O JOGO")
+    .filter((_, el) => normalizeText($(el).text()).includes("SOBRE O JOGO"))
     .toArray();
 
   anchors_found = aboutLinks.length;
 
   for (const link of aboutLinks) {
     try {
-    const href = $(link).attr("href") ?? null;
-    const details_url = absoluteUrl(url_base, href);
+      const href = $(link).attr("href") ?? null;
+      const details_url = absoluteUrl(url_base, href);
 
-    const row = pickRowFromLink($, link);
-    const rowText = row.text().replace(/\s+/g, " ").trim();
+      const row = pickRowFromLink($, link);
+      const rowText = sanitizeText($(link).text() || row.text());
 
-    if (!rowText) continue;
-    if (rowText.length > 400) {
-      candidates_discarded_too_long += 1;
-      continue;
-    }
-    if (!hasTeamsContext(rowText)) continue;
+      if (!rowText) continue;
+      if (rowText.length > 400) {
+        candidates_discarded_too_long += 1;
+        continue;
+      }
+      if (!hasTeamsContext(rowText)) continue;
 
-    rows_with_x_found += 1;
+      rows_with_x_found += 1;
 
-    const parsed = parseLine(rowText, meta.season_year);
-    if (!parsed) continue;
-    candidates_parsed += 1;
+      const parsed = parseLine(rowText, meta.season_year);
+      if (!parsed) continue;
+      candidates_parsed += 1;
 
-    candidates.push({
-      competition_name: meta.competition_name,
-      season_year: meta.season_year,
-      match_date: parsed.match_date,
-      home_team: parsed.home_team,
-      away_team: parsed.away_team,
-      goals_home: parsed.goals_home,
-      goals_away: parsed.goals_away,
-      details_url,
-    });
+      candidates.push({
+        competition_name: meta.competition_name,
+        season_year: meta.season_year,
+        match_date: parsed.match_date,
+        home_team: parsed.home_team,
+        away_team: parsed.away_team,
+        goals_home: parsed.goals_home,
+        goals_away: parsed.goals_away,
+        details_url,
+      });
     } catch {
       // tolerant parser
     }
   }
 
-  // Strategy B fallback: sweep body chunks for pattern "×" + "SOBRE O JOGO"
   if (candidates.length === 0) {
     $("tr, article, .row, section, div").each((_, el) => {
       try {
-        const text = $(el).text().replace(/\s+/g, " ").trim();
+        const text = sanitizeText($(el).text());
         if (!text) return;
         if (text.length > 400) {
           candidates_discarded_too_long += 1;
@@ -422,7 +421,7 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
 
         const detailsHref = $(el)
           .find("a")
-          .filter((__, anchor) => normalizeText($(anchor).text()) === "SOBRE O JOGO")
+          .filter((__, anchor) => normalizeText($(anchor).text()).includes("SOBRE O JOGO"))
           .first()
           .attr("href") ?? null;
         const details_url = absoluteUrl(url_base, detailsHref);
@@ -444,9 +443,7 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
   }
 
   const deduped = dedupeMatches(candidates);
-  const filtered = deduped.filter(
-    (match) => containsGaloMaringa(match.home_team) || containsGaloMaringa(match.away_team)
-  );
+  const filtered = deduped.filter((match) => containsGaloMaringa(match.home_team) || containsGaloMaringa(match.away_team));
 
   const galo_rows_found = filtered.length;
 
