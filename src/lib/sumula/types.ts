@@ -29,14 +29,68 @@ export type MatchPlayerStatScoped = MatchScopedEventBase & {
   source: string;
 };
 
+export type CanonicalTeamSide = "HOME" | "AWAY";
+export type CanonicalLineupRole = "STARTER" | "RESERVE" | "GK_STARTER" | "GK_RESERVE";
+export type CanonicalMatchPhase = "1T" | "2T";
+export type CanonicalCardPhase = CanonicalMatchPhase | "INT" | "POS";
+export type CanonicalSubstitutionPhase = CanonicalMatchPhase | "INT";
+
 export type CanonicalAthlete = {
   name: string;
+  full_name?: string | null;
   shirt_number: number | null;
+  cbf_registry?: string | null;
+  role?: CanonicalLineupRole;
+  is_captain?: boolean;
 };
 
 export type CanonicalTeamLineup = {
+  team_name?: string | null;
   starters: CanonicalAthlete[];
   reserves: CanonicalAthlete[];
+};
+
+export type CanonicalGoalEvent = {
+  type: "GOAL";
+  team_side: CanonicalTeamSide;
+  half: 1 | 2;
+  minute: number;
+  raw_phase: CanonicalMatchPhase;
+  athlete_name: string;
+  shirt_number: number | null;
+  cbf_registry?: string | null;
+  kind: "GOAL";
+};
+
+export type CanonicalCardEvent = {
+  type: "CARD";
+  team_side: CanonicalTeamSide;
+  half: 1 | 2;
+  minute: number;
+  raw_phase: CanonicalCardPhase;
+  athlete_name: string;
+  shirt_number: number | null;
+  card_type: "YELLOW" | "RED" | "SECOND_YELLOW";
+  reason: string | null;
+};
+
+export type CanonicalSubstitutionEvent = {
+  type: "SUBSTITUTION";
+  team_side: CanonicalTeamSide;
+  half: 1 | 2;
+  minute: number;
+  raw_phase: CanonicalSubstitutionPhase;
+  athlete_out_name: string;
+  athlete_out_shirt_number: number | null;
+  athlete_in_name: string;
+  athlete_in_shirt_number: number | null;
+};
+
+export type CanonicalMatchClock = {
+  first_half_added_minutes: number | null;
+  second_half_added_minutes: number | null;
+  nominal_total_minutes: 90;
+  official_total_minutes: number | null;
 };
 
 export type CanonicalMatchMeta = {
@@ -46,7 +100,14 @@ export type CanonicalMatchMeta = {
     home: number;
     away: number;
   } | null;
+  competition_name?: string | null;
+  round_label?: string | null;
+  venue?: string | null;
+  played_at?: string | null;
+  clock?: CanonicalMatchClock;
 };
+
+export type CanonicalEvent = CanonicalGoalEvent | CanonicalCardEvent | CanonicalSubstitutionEvent;
 
 export type CanonicalReport = {
   match_meta: CanonicalMatchMeta;
@@ -54,7 +115,7 @@ export type CanonicalReport = {
     home: CanonicalTeamLineup;
     away: CanonicalTeamLineup;
   };
-  events: unknown[];
+  events: CanonicalEvent[];
 };
 
 export type IngestDocumentRow = {
