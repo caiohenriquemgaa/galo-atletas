@@ -553,6 +553,7 @@ export async function rebuildPlayerStats(
       supabase,
       cbf_registry: player.cbf_registry,
       name_raw: player.athlete_name_raw,
+      match_id: input.match_id,
     });
   }
 

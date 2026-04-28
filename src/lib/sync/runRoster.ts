@@ -38,12 +38,21 @@ type AthleteImportRow = {
   fpf_competition_id: string | null;
   is_active_fpf: boolean;
   last_seen_at: string;
+  competition_name: string;
+  category_name: string | null;
+  season_year: number;
+  competition_registry_id: string;
 };
 
 type ExistingAthleteRow = {
   id: string;
   cbf_registry: string;
+  competition_registry_id: string | null;
 };
+
+function athleteCompetitionKey(input: { cbf_registry: string; competition_registry_id: string | null }) {
+  return `${input.cbf_registry}|${input.competition_registry_id ?? ""}`;
+}
 
 export type RosterSyncSummary = {
   source: "FPF_ROSTER";
@@ -105,17 +114,20 @@ export async function runRosterSync(options: SyncRunOptions = {}): Promise<{ syn
           .map((urlBase) => (urlBase ? extractCompetitionId(urlBase) : null))
           .filter((competitionId): competitionId is string => !!competitionId);
 
-        if (competitionIds.length > 0) {
-          const { error: prePassError } = await supabase
-            .from("athletes")
-            .update({ is_active_fpf: false })
-            .eq("source", "FPF")
-            .eq("club_name", "GALO MARINGA")
-            .in("fpf_competition_id", competitionIds);
+        const prePassQuery = supabase
+          .from("athletes")
+          .update({ is_active_fpf: false })
+          .eq("source", "FPF")
+          .eq("club_name", "GALO MARINGA")
+          .eq("competition_registry_id", options.competitionId);
 
-          if (prePassError) {
-            throw new Error(prePassError.message);
-          }
+        const { error: prePassError } =
+          competitionIds.length > 0
+            ? await prePassQuery.in("fpf_competition_id", competitionIds)
+            : await prePassQuery;
+
+        if (prePassError) {
+          throw new Error(prePassError.message);
         }
       } else {
         const { error: prePassError } = await supabase
@@ -154,14 +166,19 @@ export async function runRosterSync(options: SyncRunOptions = {}): Promise<{ syn
         fpf_competition_id: competitionId,
         is_active_fpf: true,
         last_seen_at: nowIso,
+        competition_name: competition.name,
+        category_name: competition.category ?? null,
+        season_year: competition.season_year,
+        competition_registry_id: competition.id,
       }));
 
       const cbfKeys = importRows.map((row) => row.cbf_registry);
 
       const { data: existingRows, error: existingError } = await supabase
         .from("athletes")
-        .select("id,cbf_registry")
+        .select("id,cbf_registry,competition_registry_id")
         .eq("source", "FPF")
+        .eq("competition_registry_id", competition.id)
         .in("cbf_registry", cbfKeys);
 
       if (existingError) {
@@ -169,14 +186,14 @@ export async function runRosterSync(options: SyncRunOptions = {}): Promise<{ syn
       }
 
       const existingMap = new Map<string, string>(
-        ((existingRows as ExistingAthleteRow[]) ?? []).map((row) => [row.cbf_registry, row.id])
+        ((existingRows as ExistingAthleteRow[]) ?? []).map((row) => [athleteCompetitionKey(row), row.id])
       );
       const existingSet = new Set<string>(existingMap.keys());
 
-      const newRows = importRows.filter((row) => !existingMap.has(row.cbf_registry));
+      const newRows = importRows.filter((row) => !existingMap.has(athleteCompetitionKey(row)));
       const updateRows = importRows
         .map((row) => ({
-          id: existingMap.get(row.cbf_registry) ?? null,
+          id: existingMap.get(athleteCompetitionKey(row)) ?? null,
           row,
         }))
         .filter((entry): entry is { id: string; row: AthleteImportRow } => !!entry.id);

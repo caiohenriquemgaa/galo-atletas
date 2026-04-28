@@ -9,6 +9,8 @@ import { supabase } from "@/lib/supabase/client";
 
 type MatchRow = {
   id: string;
+  competition_name: string;
+  season_year: number;
   match_date: string;
   opponent: string;
   home: boolean;
@@ -29,6 +31,27 @@ export default function MatchesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<"ALL" | "FPF" | "MOCK">("ALL");
+  const [competitionFilter, setCompetitionFilter] = useState("ALL");
+  const [competitionOptions, setCompetitionOptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    Promise.resolve().then(() => {
+      void (async () => {
+        const { data, error: queryError } = await supabase
+          .from("matches")
+          .select("competition_name")
+          .order("competition_name", { ascending: true })
+          .limit(500);
+
+        if (!queryError) {
+          const competitions = Array.from(
+            new Set(((data as Array<{ competition_name: string | null }>) ?? []).map((row) => row.competition_name).filter((value): value is string => !!value))
+          ).sort();
+          setCompetitionOptions(competitions);
+        }
+      })();
+    });
+  }, []);
 
   useEffect(() => {
     Promise.resolve().then(() => {
@@ -38,12 +61,16 @@ export default function MatchesPage() {
 
         let query = supabase
           .from("matches")
-          .select("id,match_date,opponent,home,goals_for,goals_against,source,venue")
+          .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against,source,venue")
           .order("match_date", { ascending: false })
-          .limit(20);
+          .limit(100);
 
         if (sourceFilter !== "ALL") {
           query = query.eq("source", sourceFilter);
+        }
+
+        if (competitionFilter !== "ALL") {
+          query = query.eq("competition_name", competitionFilter);
         }
 
         const { data, error: queryError } = await query;
@@ -58,7 +85,7 @@ export default function MatchesPage() {
         setLoading(false);
       })();
     });
-  }, [sourceFilter]);
+  }, [competitionFilter, sourceFilter]);
 
   return (
     <section className="space-y-6">
@@ -68,18 +95,36 @@ export default function MatchesPage() {
           <p className="mt-1 text-sm text-[var(--muted)]">Últimos jogos importados no sistema.</p>
         </div>
 
-        <label className="space-y-1">
-          <span className="text-xs text-[var(--muted)]">Fonte</span>
-          <select
-            value={sourceFilter}
-            onChange={(event) => setSourceFilter(event.target.value as "ALL" | "FPF" | "MOCK")}
-            className="h-10 min-w-[180px] rounded-md border border-white/15 bg-black/25 px-3 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-[var(--gold)]"
-          >
-            <option value="ALL">Todas</option>
-            <option value="FPF">FPF</option>
-            <option value="MOCK">MOCK</option>
-          </select>
-        </label>
+        <div className="flex flex-wrap gap-2">
+          <label className="space-y-1">
+            <span className="text-xs text-[var(--muted)]">Competição</span>
+            <select
+              value={competitionFilter}
+              onChange={(event) => setCompetitionFilter(event.target.value)}
+              className="h-10 min-w-[240px] rounded-md border border-white/15 bg-black/25 px-3 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-[var(--gold)]"
+            >
+              <option value="ALL">Todas</option>
+              {competitionOptions.map((competition) => (
+                <option key={competition} value={competition}>
+                  {competition}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="space-y-1">
+            <span className="text-xs text-[var(--muted)]">Fonte</span>
+            <select
+              value={sourceFilter}
+              onChange={(event) => setSourceFilter(event.target.value as "ALL" | "FPF" | "MOCK")}
+              className="h-10 min-w-[180px] rounded-md border border-white/15 bg-black/25 px-3 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-[var(--gold)]"
+            >
+              <option value="ALL">Todas</option>
+              <option value="FPF">FPF</option>
+              <option value="MOCK">MOCK</option>
+            </select>
+          </label>
+        </div>
       </div>
 
       <Card>
@@ -116,6 +161,9 @@ export default function MatchesPage() {
                     </TableCell>
                     <TableCell>
                       <p>{match.opponent}</p>
+                      <p className="text-xs text-[var(--muted)]">
+                        {match.competition_name} {match.season_year}
+                      </p>
                       {match.venue && <p className="text-xs text-[var(--muted)]">{match.venue}</p>}
                     </TableCell>
                     <TableCell>

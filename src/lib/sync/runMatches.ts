@@ -165,12 +165,14 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function loadMockAthleteSeeds(supabase: SupabaseClient<Database>) {
+async function loadMockAthleteSeeds(supabase: SupabaseClient<Database>, competitionName: string, seasonYear: number) {
   const { data, error } = await supabase
     .from("athletes")
     .select("cbf_registry,name")
     .eq("club_name", "GALO MARINGA")
     .eq("is_active_fpf", true)
+    .eq("competition_name", competitionName)
+    .eq("season_year", seasonYear)
     .order("name", { ascending: true })
     .limit(11);
 
@@ -184,7 +186,9 @@ async function loadMockAthleteSeeds(supabase: SupabaseClient<Database>) {
 async function buildMockStatsRowsForMatches(
   supabase: SupabaseClient<Database>,
   matches: UpsertedMatchRow[],
-  seeds: MockAthleteSeed[]
+  seeds: MockAthleteSeed[],
+  competitionName: string,
+  seasonYear: number
 ) {
   const rows: MatchPlayerStatImportRow[] = [];
   const pendingPayloads: PendingAthleteStatPayload[] = [];
@@ -198,6 +202,8 @@ async function buildMockStatsRowsForMatches(
         supabase,
         cbf_registry: seed.cbf_registry,
         name_raw: seed.name,
+        competition_name: competitionName,
+        season_year: seasonYear,
       });
 
       const dedupeKey = athleteId
@@ -314,7 +320,6 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
     let playersLinked = 0;
     let reportsSynced = 0;
     let reportsFailed = 0;
-    const mockSeeds = await loadMockAthleteSeeds(supabase);
 
     const summary = await withSyncTimeout(async () => {
       for (const competition of activeCompetitions) {
@@ -322,6 +327,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
       if (!competitionUrlBase) continue;
 
       competitionsChecked += 1;
+      const mockSeeds = await loadMockAthleteSeeds(supabase, competition.name, competition.season_year);
 
       const { matches, debug } = await fetchCompetitionMatchesWithDebug(competitionUrlBase);
 
@@ -577,7 +583,9 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
           const { rows: statRows, pendingPayloads, linkedCount } = await buildMockStatsRowsForMatches(
             supabase,
             importedMatchRows,
-            mockSeeds
+            mockSeeds,
+            competition.name,
+            competition.season_year
           );
 
           if (statRows.length > 0) {

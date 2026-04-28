@@ -417,6 +417,12 @@ export default function AnalyticsPage() {
     });
   }, [athletesById, filteredMatches, filteredStatsRows]);
 
+  const selectedCompetitionLabel = useMemo(() => {
+    const competition = competitionFilter === "ALL" ? "todas as competicoes" : competitionFilter;
+    const season = seasonFilter === "ALL" ? "todas as temporadas" : seasonFilter;
+    return `${competition} (${season})`;
+  }, [competitionFilter, seasonFilter]);
+
   function handleExportCardsCsv() {
     if (cardControlCsvRows.length === 0) {
       toast({
@@ -579,7 +585,9 @@ export default function AnalyticsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Alerta disciplinar</CardTitle>
-            <CardDescription>O calculo automatico desta tela esta configurado com base no REC do Paranaense Sub-20 2026 - 1a Divisao.</CardDescription>
+            <CardDescription>
+              O calculo automatico desta tela ainda nao possui regra disciplinar configurada para {selectedCompetitionLabel}.
+            </CardDescription>
           </CardHeader>
         </Card>
       )}

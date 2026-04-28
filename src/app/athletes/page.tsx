@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { downloadCsv } from "@/lib/export/csv";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +19,8 @@ type Athlete = {
   created_at: string;
   source: "FPF" | "MANUAL" | string | null;
   is_active_fpf: boolean | null;
+  competition_name: string | null;
+  season_year: number | null;
 };
 
 type MatchMeta = {
@@ -52,6 +54,28 @@ function isCompletedStatsExportRow(row: StatsExportRow & { match: MatchMeta | nu
   return (row.minutes ?? 0) > 0 || row.match.goals_for !== null || row.match.goals_against !== null;
 }
 
+function sanitizeFilenamePart(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
+function getSquadCsvFilename(competitionFilter: string, seasonFilter: string) {
+  const competitionPart =
+    competitionFilter === "ALL"
+      ? "todas"
+      : sanitizeFilenamePart(competitionFilter)
+          .replace(/^paranaense_/, "")
+          .replace(/_2026.*$/, "")
+          .replace(/_1_divisao$/, "");
+  const seasonPart = seasonFilter === "ALL" ? "todas" : seasonFilter;
+
+  return `elenco_${competitionPart}_${seasonPart}.csv`;
+}
+
 export default function AthletesPage() {
   const { toast } = useToast();
 
@@ -67,14 +91,24 @@ export default function AthletesPage() {
 
   const [exporting, setExporting] = useState(false);
 
-  async function loadAthletes() {
+  const loadAthletes = useCallback(async () => {
     setLoading(true);
     setError(null);
 
-    const { data, error: queryError } = await supabase
+    let query = supabase
       .from("athletes")
-      .select("id,name,nickname,position,cbf_registry,dob,created_at,source,is_active_fpf")
+      .select("id,name,nickname,position,cbf_registry,dob,created_at,source,is_active_fpf,competition_name,season_year")
       .order("created_at", { ascending: false });
+
+    if (competitionFilter !== "ALL") {
+      query = query.eq("competition_name", competitionFilter);
+    }
+
+    if (seasonFilter !== "ALL") {
+      query = query.eq("season_year", Number(seasonFilter));
+    }
+
+    const { data, error: queryError } = await query;
 
     if (queryError) {
       setError("Não foi possível carregar os atletas. Tente novamente.");
@@ -84,19 +118,19 @@ export default function AthletesPage() {
     }
 
     setLoading(false);
-  }
+  }, [competitionFilter, seasonFilter]);
 
   async function loadFilters() {
     setFilterLoading(true);
 
     const { data, error: queryError } = await supabase
-      .from("matches")
+      .from("athletes")
       .select("competition_name,season_year")
-      .order("match_date", { ascending: false })
+      .not("competition_name", "is", null)
       .limit(500);
 
     if (!queryError) {
-      const rows = (data as MatchMeta[]) ?? [];
+      const rows = (data as Array<{ competition_name: string | null; season_year: number | null }>) ?? [];
       const competitions = Array.from(
         new Set(rows.map((row) => row.competition_name).filter((value): value is string => !!value))
       ).sort();
@@ -117,10 +151,20 @@ export default function AthletesPage() {
   async function handleExportSquadCsv() {
     setExporting(true);
 
-    const { data: athleteData, error: athleteError } = await supabase
+    let athleteQuery = supabase
       .from("athletes")
       .select("id,name,position")
       .order("name", { ascending: true });
+
+    if (competitionFilter !== "ALL") {
+      athleteQuery = athleteQuery.eq("competition_name", competitionFilter);
+    }
+
+    if (seasonFilter !== "ALL") {
+      athleteQuery = athleteQuery.eq("season_year", Number(seasonFilter));
+    }
+
+    const { data: athleteData, error: athleteError } = await athleteQuery;
 
     if (athleteError) {
       toast({
@@ -200,11 +244,13 @@ export default function AthletesPage() {
       red_cards: athlete.red_cards,
     }));
 
-    downloadCsv("elenco.csv", csvRows);
+    const filename = getSquadCsvFilename(competitionFilter, seasonFilter);
+
+    downloadCsv(filename, csvRows);
 
     toast({
       title: "CSV gerado",
-      description: "Arquivo elenco.csv baixado com sucesso.",
+      description: `Arquivo ${filename} baixado com sucesso.`,
     });
 
     setExporting(false);
@@ -212,10 +258,15 @@ export default function AthletesPage() {
 
   useEffect(() => {
     Promise.resolve().then(() => {
-      void loadAthletes();
       void loadFilters();
     });
   }, []);
+
+  useEffect(() => {
+    Promise.resolve().then(() => {
+      void loadAthletes();
+    });
+  }, [loadAthletes]);
 
   const hasFilters = useMemo(() => competitionOptions.length > 0 || seasonOptions.length > 0, [competitionOptions, seasonOptions]);
 
@@ -239,8 +290,8 @@ export default function AthletesPage() {
       {hasFilters && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Filtros para exportação</CardTitle>
-            <CardDescription>Selecione competição e temporada para filtrar os totais do CSV.</CardDescription>
+            <CardTitle className="text-lg">Filtros</CardTitle>
+            <CardDescription>Selecione competição e temporada para filtrar a lista e o CSV.</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -316,6 +367,12 @@ export default function AthletesPage() {
                           <Badge variant={athlete.source === "FPF" ? "default" : "outline"}>
                             {athlete.source === "FPF" ? "FPF" : "MANUAL"}
                           </Badge>
+                          {athlete.competition_name && (
+                            <Badge variant="outline">
+                              {athlete.competition_name}
+                              {athlete.season_year ? ` ${athlete.season_year}` : ""}
+                            </Badge>
+                          )}
                           {athlete.source === "FPF" && athlete.is_active_fpf === false && (
                             <Badge variant="destructive">INATIVO</Badge>
                           )}
