@@ -5,7 +5,7 @@ import { linkAthlete } from "@/lib/linking/linkAthlete";
 import { syncFinishedMatchReport } from "@/lib/sumula/syncFinishedMatchReport";
 import type { Database } from "@/lib/supabase/database.types";
 import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
-import { normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
+import { extractCompetitionId, extractMatchId, normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 import {
   buildCompetitionSummary,
@@ -22,6 +22,8 @@ type CompetitionRow = {
   category?: string | null;
   season_year: number;
   url_base: string | null;
+  fpf_competition_id?: string | null;
+  external_competition_id?: string | null;
   is_active: boolean;
 };
 
@@ -31,8 +33,10 @@ type SyncStateRow = {
 };
 
 type MatchImportRow = {
+  competition_registry_id: string;
   competition_name: string;
   season_year: number;
+  external_match_id: string;
   match_date: string;
   opponent: string;
   home: boolean;
@@ -49,6 +53,10 @@ type MatchImportRow = {
 
 type UpsertedMatchRow = {
   id: string;
+  competition_registry_id?: string | null;
+  competition_name?: string | null;
+  season_year?: number | null;
+  external_match_id?: string | null;
   source_url: string;
   match_date?: string;
   home?: boolean | null;
@@ -273,6 +281,88 @@ async function buildMockStatsRowsForMatches(
   };
 }
 
+function deriveExpectedCompetitionLabel(competition: Pick<CompetitionRow, "name" | "season_year">) {
+  const baseName = competition.name.split(" - ")[0]?.trim() || competition.name;
+  return normalizeText(baseName).includes(String(competition.season_year))
+    ? normalizeText(baseName)
+    : normalizeText(`${baseName} ${competition.season_year}`);
+}
+
+function extractSubCategory(value: string) {
+  return normalizeText(value).match(/\bSUB[- ]?(\d{2})\b/)?.[1] ?? null;
+}
+
+function assertCompetitionPageMatches(input: {
+  competition: CompetitionRow;
+  competitionUrlBase: string;
+  competitionId: string | null;
+  pageCompetitionText: string;
+}) {
+  if (!input.competitionId) {
+    throw new Error(
+      `Competição ${input.competition.name} sem identificador FPF próprio em url_base: ${input.competitionUrlBase}`
+    );
+  }
+
+  const expectedLabel = deriveExpectedCompetitionLabel(input.competition);
+  const pageText = normalizeText(input.pageCompetitionText);
+  const expectedSub = extractSubCategory(expectedLabel);
+  const actualSub = extractSubCategory(pageText);
+
+  if (expectedSub && actualSub && expectedSub !== actualSub) {
+    throw new Error(
+      `Página FPF incompatível para ${input.competition.name}: esperado SUB-${expectedSub}, recebido SUB-${actualSub} (${input.pageCompetitionText}).`
+    );
+  }
+
+  if (!pageText.includes(expectedLabel)) {
+    throw new Error(
+      `Página FPF incompatível para ${input.competition.name}: texto da página "${input.pageCompetitionText}" não contém "${expectedLabel}".`
+    );
+  }
+}
+
+function stableExternalMatchId(input: {
+  competitionId: string;
+  matchDateIso: string;
+  homeTeam: string;
+  awayTeam: string;
+  detailsUrl: string | null;
+}) {
+  const fromDetailsUrl = extractMatchId(input.detailsUrl);
+  if (fromDetailsUrl) return fromDetailsUrl;
+
+  return [
+    input.competitionId,
+    input.matchDateIso,
+    normalizeText(input.homeTeam),
+    normalizeText(input.awayTeam),
+  ].join(":");
+}
+
+function matchImportKey(row: Pick<MatchImportRow, "competition_registry_id" | "season_year" | "external_match_id">) {
+  return `${row.competition_registry_id}|${row.season_year}|${row.external_match_id}`;
+}
+
+function toMatchUpdateRow(row: MatchImportRow) {
+  return {
+    match_date: row.match_date,
+    opponent: row.opponent,
+    home: row.home,
+    goals_for: row.goals_for,
+    goals_against: row.goals_against,
+    source: row.source,
+    source_url: row.source_url,
+    external_match_id: row.external_match_id,
+    venue: row.venue,
+    kickoff_time: row.kickoff_time,
+    referee: row.referee,
+    home_team: row.home_team,
+    away_team: row.away_team,
+    competition_registry_id: row.competition_registry_id,
+  };
+}
+
 export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ syncRun: SyncRunRow; summary: MatchesSyncSummary }> {
   const supabase = getSupabaseAdmin();
   let runId: string | null = null;
@@ -282,7 +372,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
 
     let competitionsQuery = supabase
       .from("competitions_registry")
-      .select("id,name,category,season_year,url_base,is_active")
+      .select("id,name,category,season_year,url_base,fpf_competition_id,external_competition_id,is_active")
       .eq("is_active", true)
       .order("season_year", { ascending: false });
 
@@ -322,11 +412,24 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
       for (const competition of activeCompetitions) {
       const competitionUrlBase = normalizeCompetitionUrlBase(competition.url_base, competition.category);
       if (!competitionUrlBase) continue;
+      const competitionId =
+        competition.fpf_competition_id ?? competition.external_competition_id ?? extractCompetitionId(competitionUrlBase);
+      if (!competitionId) {
+        throw new Error(
+          `Competição ${competition.name} sem identificador FPF próprio em url_base: ${competitionUrlBase}`
+        );
+      }
 
       competitionsChecked += 1;
       const mockSeeds = await loadMockAthleteSeeds(supabase, competition.name, competition.season_year);
 
       const { matches, debug } = await fetchCompetitionMatchesWithDebug(competitionUrlBase);
+      assertCompetitionPageMatches({
+        competition,
+        competitionUrlBase,
+        competitionId,
+        pageCompetitionText: debug.page_competition_text,
+      });
 
       fetchedBytes += debug.fetched_bytes;
       anchorsFound += debug.anchors_found;
@@ -403,10 +506,19 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
           awayTeam: resolvedAwayTeam,
           detailsUrl: item.details_url,
         });
+        const externalMatchId = stableExternalMatchId({
+          competitionId,
+          matchDateIso,
+          homeTeam: resolvedHomeTeam,
+          awayTeam: resolvedAwayTeam,
+          detailsUrl: item.details_url,
+        });
 
         return [{
+          competition_registry_id: competition.id,
           competition_name: competition.name,
           season_year: competition.season_year,
+          external_match_id: externalMatchId,
           match_date: matchDateIso,
           opponent,
           home: galoHome,
@@ -425,6 +537,8 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
       const stateHash = hashPayload(
         importRows
           .map((row) => ({
+            competition_registry_id: row.competition_registry_id,
+            external_match_id: row.external_match_id,
             source_url: row.source_url,
             match_date: row.match_date,
             opponent: row.opponent,
@@ -451,44 +565,46 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
       }
 
       const nowIso = new Date().toISOString();
-      let existingMatchMap = new Map<string, string>();
+      const existingMatchMap = new Map<string, string>();
+      const conflictingExternalMatchIds = new Set<string>();
 
       if (importRows.length > 0) {
-        const sourceUrls = importRows.map((row) => row.source_url);
+        const externalMatchIds = importRows.map((row) => row.external_match_id);
         const { data: existingMatches, error: existingMatchesError } = await supabase
           .from("matches")
-          .select("id,source_url,match_date")
+          .select("id,competition_registry_id,competition_name,season_year,external_match_id,source_url,match_date")
           .eq("source", "FPF")
-          .in("source_url", sourceUrls);
+          .in("external_match_id", externalMatchIds);
 
         if (existingMatchesError) {
           throw new Error(existingMatchesError.message);
         }
 
-        existingMatchMap = new Map<string, string>(
-          ((existingMatches as UpsertedMatchRow[]) ?? []).map((row) => [row.source_url, row.id])
-        );
+        for (const row of ((existingMatches as UpsertedMatchRow[]) ?? [])) {
+          if (!row.external_match_id) continue;
 
-        const currentSourceUrls = new Set(importRows.map((row) => row.source_url));
-        const { data: competitionMatches, error: competitionMatchesError } = await supabase
-          .from("matches")
-          .select("id,source_url")
-          .eq("source", "FPF")
-          .eq("competition_name", competition.name)
-          .eq("season_year", competition.season_year);
+          const sameCompetition =
+            row.competition_registry_id === competition.id ||
+            (!row.competition_registry_id &&
+              row.competition_name === competition.name &&
+              row.season_year === competition.season_year);
 
-        if (competitionMatchesError) {
-          throw new Error(competitionMatchesError.message);
-        }
-
-        const staleMatchIds = ((competitionMatches as UpsertedMatchRow[]) ?? [])
-          .filter((row) => !currentSourceUrls.has(row.source_url))
-          .map((row) => row.id);
-
-        if (staleMatchIds.length > 0) {
-          const { error: deleteStaleMatchesError } = await supabase.from("matches").delete().in("id", staleMatchIds);
-          if (deleteStaleMatchesError) {
-            throw new Error(deleteStaleMatchesError.message);
+          if (sameCompetition) {
+            existingMatchMap.set(
+              matchImportKey({
+                competition_registry_id: competition.id,
+                season_year: competition.season_year,
+                external_match_id: row.external_match_id,
+              }),
+              row.id
+            );
+          } else {
+            conflictingExternalMatchIds.add(row.external_match_id);
+            console.warn("[sync.matches] external_match_id already exists in another competition; skipping import", {
+              externalMatchId: row.external_match_id,
+              currentCompetition: competition.name,
+              existingCompetition: row.competition_name,
+            });
           }
         }
       }
@@ -508,10 +624,11 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
       }
 
       if (importRows.length > 0) {
-        const newRows = importRows.filter((row) => !existingMatchMap.has(row.source_url));
-        const updateRows = importRows
+        const importableRows = importRows.filter((row) => !conflictingExternalMatchIds.has(row.external_match_id));
+        const newRows = importableRows.filter((row) => !existingMatchMap.has(matchImportKey(row)));
+        const updateRows = importableRows
           .map((row) => ({
-            id: existingMatchMap.get(row.source_url) ?? null,
+            id: existingMatchMap.get(matchImportKey(row)) ?? null,
             row,
           }))
           .filter((entry): entry is { id: string; row: MatchImportRow } => !!entry.id);
@@ -522,7 +639,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
           const { data: insertedMatches, error: insertError } = await supabase
             .from("matches")
             .insert(newRows)
-            .select("id,source_url,home");
+            .select("id,external_match_id,source_url,home");
 
           if (insertError) {
             throw new Error(insertError.message);
@@ -530,7 +647,15 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
 
           const inserted = (insertedMatches as UpsertedMatchRow[]) ?? [];
           for (const row of inserted) {
-            existingMatchMap.set(row.source_url, row.id);
+            if (!row.external_match_id) continue;
+            existingMatchMap.set(
+              matchImportKey({
+                competition_registry_id: competition.id,
+                season_year: competition.season_year,
+                external_match_id: row.external_match_id,
+              }),
+              row.id
+            );
           }
           importedMatchRows.push(...inserted);
         }
@@ -538,14 +663,14 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
         for (const entry of updateRows) {
           const { error: updateError } = await supabase
             .from("matches")
-            .update(entry.row)
+            .update(toMatchUpdateRow(entry.row))
             .eq("id", entry.id);
 
           if (updateError) {
             throw new Error(updateError.message);
           }
 
-          existingMatchMap.set(entry.row.source_url, entry.id);
+          existingMatchMap.set(matchImportKey(entry.row), entry.id);
           importedMatchRows.push({
             id: entry.id,
             source_url: entry.row.source_url,
@@ -608,7 +733,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
           playersLinked += linkedCount;
         }
 
-        matchesImported += importRows.length;
+        matchesImported += importedMatchRows.length;
       }
 
       const { error: upsertStateError } = await supabase.from("sync_state").upsert({
@@ -688,7 +813,7 @@ export async function processPendingMatchesSync(
 
     let competitionsQuery = supabase
       .from("competitions_registry")
-      .select("id,name,category,season_year,url_base,is_active")
+      .select("id,name,category,season_year,url_base,fpf_competition_id,external_competition_id,is_active")
       .eq("is_active", true)
       .order("season_year", { ascending: false });
 

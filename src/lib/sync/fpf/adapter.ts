@@ -4,6 +4,7 @@ import type { AnyNode } from "domhandler";
 export type FpfNormalizedMatch = {
   competition_name: string;
   season_year: number;
+  external_match_id: string | null;
   match_date: Date;
   home_team: string;
   away_team: string;
@@ -20,6 +21,7 @@ export type FpfAdapterDebug = {
   imported: number;
   rows_with_x_found: number;
   galo_rows_found: number;
+  page_competition_text: string;
 };
 
 export type FpfMatchDetails = {
@@ -120,6 +122,12 @@ function absoluteUrl(urlBase: string, href: string | null) {
   } catch {
     return null;
   }
+}
+
+function extractExternalMatchId(detailsUrl: string | null) {
+  if (!detailsUrl) return null;
+  const match = detailsUrl.match(/\/jogo\/(\d+)\/?$/i);
+  return match?.[1] ?? null;
 }
 
 function deriveMetaFromPage(urlBase: string, title: string) {
@@ -388,6 +396,7 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
       candidates.push({
         competition_name: meta.competition_name,
         season_year: meta.season_year,
+        external_match_id: extractExternalMatchId(details_url),
         match_date: parsed.match_date,
         home_team: parsed.home_team,
         away_team: parsed.away_team,
@@ -429,6 +438,7 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
         candidates.push({
           competition_name: meta.competition_name,
           season_year: meta.season_year,
+          external_match_id: extractExternalMatchId(details_url),
           match_date: parsed.match_date,
           home_team: parsed.home_team,
           away_team: parsed.away_team,
@@ -457,6 +467,7 @@ export async function fetchCompetitionMatchesWithDebug(url_base: string) {
       imported: filtered.length,
       rows_with_x_found,
       galo_rows_found,
+      page_competition_text: sanitizeText(title),
     } as FpfAdapterDebug,
   };
 }

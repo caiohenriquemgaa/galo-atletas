@@ -66,3 +66,16 @@ export function extractCompetitionId(rawUrl: string | null | undefined) {
   const match = normalized.match(/\/(\d+)\/?$/);
   return match?.[1] ?? null;
 }
+
+export function extractMatchId(rawUrl: string | null | undefined) {
+  if (!rawUrl?.trim()) return null;
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const match = parsed.pathname.match(/\/jogo\/(\d+)\/?$/i);
+    return match?.[1] ?? null;
+  } catch {
+    const match = rawUrl.match(/\/jogo\/(\d+)\/?$/i);
+    return match?.[1] ?? null;
+  }
+}
