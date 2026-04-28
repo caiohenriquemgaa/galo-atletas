@@ -106,7 +106,6 @@ type StatsInsertRow = {
   cbf_registry: string | null;
   athlete_name_raw: string | null;
   minutes: number;
-  minutes_played: number;
   started: boolean;
   is_captain: boolean;
   participated: boolean;
@@ -586,7 +585,6 @@ export async function rebuildPlayerStats(
       cbf_registry: player.cbf_registry,
       athlete_name_raw: player.athlete_name_raw,
       minutes: minutesPlayed,
-      minutes_played: minutesPlayed,
       started: player.started,
       is_captain: player.is_captain,
       participated,

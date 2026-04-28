@@ -339,6 +339,18 @@ export default function AnalyticsPage() {
     };
   }, [athletesById, filteredMatches, filteredStatsRows]);
 
+  const analyticsCsvRows = useMemo(() => {
+    return rows.map((row) => ({
+      atleta: row.name,
+      jogos: row.games,
+      minutos: row.totalMinutes,
+      gols: row.totalGoals,
+      assistencias: row.totalAssists,
+      amarelos: row.totalYellow,
+      vermelhos: row.totalRed,
+    }));
+  }, [rows]);
+
   const cardControlCsvRows = useMemo(() => {
     const orderedMatches = [...filteredMatches].sort((a, b) => new Date(a.match_date).getTime() - new Date(b.match_date).getTime());
     const rowsByAthlete = filteredStatsRows.reduce<Map<string, Array<StatsRow & { match: MatchInfo }>>>((acc, row) => {
@@ -475,6 +487,27 @@ export default function AnalyticsPage() {
     setExportingCardsCsv(false);
   }
 
+  function handleExportAnalyticsCsv() {
+    if (analyticsCsvRows.length === 0) {
+      toast({
+        variant: "destructive",
+        title: "Nada para exportar",
+        description: "Nao ha dados de analytics nos filtros selecionados.",
+      });
+      return;
+    }
+
+    const competitionSuffix = competitionFilter === "ALL" ? "todas_competicoes" : sanitizeFilenamePart(competitionFilter);
+    const seasonSuffix = seasonFilter === "ALL" ? "todas_temporadas" : seasonFilter;
+
+    downloadCsv(`analytics_${competitionSuffix}_${seasonSuffix}.csv`, analyticsCsvRows);
+
+    toast({
+      title: "CSV gerado",
+      description: "Arquivo de analytics baixado com sucesso.",
+    });
+  }
+
   const hasData = rows.length > 0;
 
   return (
@@ -605,6 +638,18 @@ export default function AnalyticsPage() {
             </CardContent>
           </Card>
           </div>
+        </div>
+      )}
+
+      {!loading && !error && hasData && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-white">Exportacao de analytics</p>
+            <p className="text-sm text-[var(--muted)]">Baixe um CSV com jogos, minutos, gols, assistencias e cartoes por atleta.</p>
+          </div>
+          <Button variant="outline" onClick={handleExportAnalyticsCsv}>
+            Exportar analytics (CSV)
+          </Button>
         </div>
       )}
 
