@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { parseToCanonical } from "@/lib/parsers/fpfReportParser";
+import { parseSumulaFlexible, parseSumulaLegacy } from "@/lib/parsers/fpfReportParser";
 import { rebuildPlayerStats } from "@/lib/sumula/rebuildPlayerStats";
 import type {
   CanonicalAthlete,
@@ -23,6 +23,7 @@ const DOC_TYPE = "FPF_SUMULA";
 const SOURCE = "FPF";
 const PARSER_VERSION = "v1";
 const INGEST_SOURCE = "FPF_SUMULA_CANONICAL";
+type ParserUsed = "legacy" | "flexible";
 
 type SyncDocumentRow = {
   id: string;
@@ -105,6 +106,61 @@ type CanonicalEventMap = {
 function normalizeName(value: string | null | undefined) {
   if (!value) return "";
   return value.replace(/\s+/g, " ").trim();
+}
+
+function hasName(value: string | null | undefined) {
+  return normalizeName(value).length > 0;
+}
+
+export function hasValidParsedStats(result: CanonicalReport & { match_player_stats?: unknown[] }) {
+  const lineupAthletes = [
+    ...(result.lineups?.home?.starters ?? []),
+    ...(result.lineups?.home?.reserves ?? []),
+    ...(result.lineups?.away?.starters ?? []),
+    ...(result.lineups?.away?.reserves ?? []),
+  ];
+
+  const hasIdentifiedPlayers = lineupAthletes.some((athlete) => hasName(athlete.full_name ?? athlete.name));
+  const hasIdentifiedGoals = result.events?.some((event) => event.type === "GOAL" && hasName(event.athlete_name)) ?? false;
+  const hasIdentifiedSubstitutions =
+    result.events?.some(
+      (event) => event.type === "SUBSTITUTION" && (hasName(event.athlete_out_name) || hasName(event.athlete_in_name))
+    ) ?? false;
+  const hasGeneratedStats = Array.isArray(result.match_player_stats) && result.match_player_stats.length > 0;
+
+  return hasIdentifiedPlayers || hasIdentifiedGoals || hasIdentifiedSubstitutions || hasGeneratedStats;
+}
+
+function parseWithFallback(rawText: string) {
+  let result: CanonicalReport;
+  let parserUsed: ParserUsed;
+
+  try {
+    result = parseSumulaLegacy(rawText);
+
+    if (!hasValidParsedStats(result)) {
+      throw new Error("LEGACY_PARSER_EMPTY_RESULT");
+    }
+
+    parserUsed = "legacy";
+  } catch (legacyError) {
+    console.warn("Parser atual falhou, tentando parser flexível", legacyError);
+
+    try {
+      result = parseSumulaFlexible(rawText);
+
+      if (!hasValidParsedStats(result)) {
+        throw new Error("FLEXIBLE_PARSER_EMPTY_RESULT");
+      }
+
+      parserUsed = "flexible";
+    } catch (flexibleError) {
+      const message = flexibleError instanceof Error ? flexibleError.message : "Erro inesperado no parser flexível.";
+      throw new Error(`Falha nos parsers legacy e flexible: ${message}`);
+    }
+  }
+
+  return { result, parserUsed };
 }
 
 function isLineupRole(value: unknown): value is CanonicalLineupRole {
@@ -369,7 +425,7 @@ export async function syncFinishedMatchReport(
   }
 
   const rawText = await extractPdfRawText(pdfBuffer);
-  const canonical: CanonicalReport = parseToCanonical(rawText);
+  const { result: canonical, parserUsed } = parseWithFallback(rawText);
 
   const { error: saveDocumentError } = await supabase
     .from("documents")
@@ -378,6 +434,7 @@ export async function syncFinishedMatchReport(
       canonical_json: canonical,
       status: "CANONICAL",
       parse_error: null,
+      parser_version: `${PARSER_VERSION}:${parserUsed}`,
       parsed_at: new Date().toISOString(),
       canonical_at: new Date().toISOString(),
       sha256,
@@ -487,5 +544,6 @@ export async function syncFinishedMatchReport(
     cards_inserted: parsedEvents.cards.length,
     substitutions_inserted: parsedEvents.substitutions.length,
     stats_inserted: statsResult.inserted_rows,
+    parser_used: parserUsed,
   };
 }

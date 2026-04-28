@@ -683,6 +683,10 @@ function parseSequentialSubstitutions(sectionLines: string[], context: TeamConte
 
 export function parseToCanonical(rawText: string): CanonicalReport {
   const lines = toLines(rawText);
+  return parseLinesToCanonical(lines);
+}
+
+function parseLinesToCanonical(lines: string[]): CanonicalReport {
   const sections = splitSections(lines);
   const meta = parseMatchMeta(getSectionLines(sections, "PREAMBLE"), getSectionLines(sections, "2.0"));
   const lineupEntries = parseSequentialLineupEntries(getSectionLines(sections, "4.0"));
@@ -704,4 +708,18 @@ export function parseToCanonical(rawText: string): CanonicalReport {
     lineups,
     events,
   };
+}
+
+function addSectionBreaks(rawText: string) {
+  return normalizePdfText(rawText)
+    .replace(/\s+(\d{1,2}\.\d\s*-\s*)/g, "\n$1")
+    .replace(/\s+(\*\*1T\s*=)/g, "\n$1");
+}
+
+export function parseSumulaLegacy(rawText: string): CanonicalReport {
+  return parseToCanonical(rawText);
+}
+
+export function parseSumulaFlexible(rawText: string): CanonicalReport {
+  return parseLinesToCanonical(toLines(addSectionBreaks(rawText)));
 }

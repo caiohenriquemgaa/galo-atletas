@@ -712,9 +712,12 @@ export async function processPendingMatchesSync(
         .from("matches")
         .select("id,competition_name,season_year,source_url")
         .eq("source", "FPF")
-        .eq("processed", false)
         .order("match_date", { ascending: true })
         .limit(MAX_MATCHES_PER_RUN);
+
+      if (!options.force) {
+        matchesQuery = matchesQuery.eq("processed", false);
+      }
 
       const selectedCompetition = options.competitionId ? activeCompetitions[0] : null;
 
@@ -746,7 +749,7 @@ export async function processPendingMatchesSync(
             throw new Error("Súmula ainda não disponível para esta partida.");
           }
 
-          await syncFinishedMatchReport(supabase, {
+          const reportResult = await syncFinishedMatchReport(supabase, {
             matchId: match.id,
             sumulaUrl: details.sumula_url,
           });
@@ -757,6 +760,7 @@ export async function processPendingMatchesSync(
               processed: true,
               processed_at: new Date().toISOString(),
               processing_error: null,
+              parser_used: reportResult.parser_used,
             })
             .eq("id", match.id);
 
@@ -773,6 +777,7 @@ export async function processPendingMatchesSync(
             .from("matches")
             .update({
               processing_error: message,
+              parser_used: "failed",
             })
             .eq("id", match.id);
 

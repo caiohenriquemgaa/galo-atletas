@@ -356,22 +356,6 @@ export async function rebuildPlayerStats(
     match_id: string | null;
   }
 ): Promise<RebuildPlayerStatsResult> {
-  const { data: existingStats, error: existingStatsError } = await supabase
-    .from("match_player_stats")
-    .select("id")
-    .eq("match_key", input.match_key);
-
-  if (existingStatsError) {
-    throw new Error(`Could not read existing stats: ${existingStatsError.message}`);
-  }
-
-  const deletedRows = (existingStats as { id: string }[] | null)?.length ?? 0;
-
-  const { error: deleteError } = await supabase.from("match_player_stats").delete().eq("match_key", input.match_key);
-  if (deleteError) {
-    throw new Error(`Could not delete existing stats: ${deleteError.message}`);
-  }
-
   const [lineupsRes, goalsRes, cardsRes, substitutionsRes, documentRes] = await Promise.all([
     supabase
       .from("match_lineups")
@@ -598,11 +582,35 @@ export async function rebuildPlayerStats(
     });
   }
 
-  if (rows.length > 0) {
-    const { error: insertError } = await supabase.from("match_player_stats").insert(rows);
-    if (insertError) {
-      throw new Error(`Could not insert rebuilt stats: ${insertError.message}`);
-    }
+  if (rows.length === 0) {
+    return {
+      match_key: input.match_key,
+      document_id: input.document_id,
+      match_id: input.match_id,
+      deleted_rows: 0,
+      inserted_rows: 0,
+    };
+  }
+
+  const { data: existingStats, error: existingStatsError } = await supabase
+    .from("match_player_stats")
+    .select("id")
+    .eq("match_key", input.match_key);
+
+  if (existingStatsError) {
+    throw new Error(`Could not read existing stats: ${existingStatsError.message}`);
+  }
+
+  const deletedRows = (existingStats as { id: string }[] | null)?.length ?? 0;
+
+  const { error: deleteError } = await supabase.from("match_player_stats").delete().eq("match_key", input.match_key);
+  if (deleteError) {
+    throw new Error(`Could not delete existing stats: ${deleteError.message}`);
+  }
+
+  const { error: insertError } = await supabase.from("match_player_stats").insert(rows);
+  if (insertError) {
+    throw new Error(`Could not insert rebuilt stats: ${insertError.message}`);
   }
 
   return {

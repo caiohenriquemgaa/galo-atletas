@@ -6,6 +6,7 @@ export const RUNNING_SYNC_ERROR =
 
 export type SyncRunOptions = {
   competitionId?: string | null;
+  force?: boolean;
   timeoutMs?: number;
 };
 

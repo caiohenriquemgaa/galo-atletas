@@ -6,6 +6,7 @@ import { RUNNING_SYNC_ERROR } from "@/lib/sync/syncRun";
 
 type SyncRequestBody = {
   competition_id?: unknown;
+  force?: unknown;
 };
 
 function isAuthorized(request: Request) {
@@ -20,7 +21,8 @@ export async function GET(request: Request) {
 
   try {
     const competitionId = new URL(request.url).searchParams.get("competition_id");
-    const { syncRun, summary } = await processPendingMatchesSync({ competitionId });
+    const force = new URL(request.url).searchParams.get("force") === "true";
+    const { syncRun, summary } = await processPendingMatchesSync({ competitionId, force });
     return NextResponse.json(
       {
         status: syncRun.status,
@@ -38,7 +40,8 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as SyncRequestBody;
     const competitionId = typeof body.competition_id === "string" && body.competition_id ? body.competition_id : null;
-    const { syncRun, summary } = await processPendingMatchesSync({ competitionId });
+    const force = body.force === true;
+    const { syncRun, summary } = await processPendingMatchesSync({ competitionId, force });
     return NextResponse.json(
       {
         status: syncRun.status,
