@@ -60,7 +60,7 @@ export async function GET(request: Request) {
   const statsQuery =
     "match_player_stats select athlete_id,match_id,source,minutes,goals,assists,yellow_cards,red_cards; join in memory on match_player_stats.match_id = matches.id";
 
-  const [{ data: athletesData, error: athletesError }, { data: statsData, error: statsError }, { data: matchesData, error: matchesError }] =
+  const [{ data: athletesData, error: athletesError }, { data: statsData, error: statsError }, { data: matchesData, error: matchesError }, { data: competitionsData, error: competitionsError }] =
     await Promise.all([
       supabase.from("athletes").select("id,name"),
       supabase.from("match_player_stats").select("athlete_id,match_id,source,minutes,goals,assists,yellow_cards,red_cards"),
@@ -68,13 +68,14 @@ export async function GET(request: Request) {
         .from("matches")
         .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against,match_duration_minutes")
         .order("match_date", { ascending: false }),
+      supabase.from("competitions_registry").select("name").eq("is_active", true),
     ]);
 
-  if (athletesError || statsError || matchesError) {
+  if (athletesError || statsError || matchesError || competitionsError) {
     return NextResponse.json(
       {
         error: "Nao foi possivel carregar os dados de analytics.",
-        details: athletesError?.message ?? statsError?.message ?? matchesError?.message,
+        details: athletesError?.message ?? statsError?.message ?? matchesError?.message ?? competitionsError?.message,
       },
       { status: 500 }
     );
@@ -83,16 +84,20 @@ export async function GET(request: Request) {
   const athletes = (athletesData as AthleteRow[] | null) ?? [];
   const stats = (statsData as StatRow[] | null) ?? [];
   const matches = (matchesData as MatchRow[] | null) ?? [];
-  const matchesById = new Map(matches.map((match) => [match.id, match]));
+  const activeCompetitions = (competitionsData as { name: string }[] | null)?.map(c => c.name) ?? [];
+
+  // Filtrar matches apenas para competições ativas
+  const activeMatches = matches.filter(match => activeCompetitions.includes(match.competition_name));
+  const matchesById = new Map(activeMatches.map((match) => [match.id, match]));
   const matchIdsWithStats = new Set(stats.map((row) => row.match_id).filter((matchId): matchId is string => !!matchId));
 
-  const matchesWithStats = matches.filter((match) => matchIdsWithStats.has(match.id));
+  const matchesWithStats = activeMatches.filter((match) => matchIdsWithStats.has(match.id));
   const competitionOptions = Array.from(new Set(matchesWithStats.map((match) => match.competition_name))).sort();
   const seasonOptions = Array.from(new Set(matchesWithStats.map((match) => match.season_year)))
     .sort((a, b) => b - a)
     .map((season) => String(season));
 
-  const filteredMatches = matches.filter(
+  const filteredMatches = activeMatches.filter(
     (match) => matchesCompetitionFilter(match, selectedCompetition) && matchesSeasonFilter(match, selectedSeason)
   );
   const filteredMatchIds = new Set(filteredMatches.map((match) => match.id));

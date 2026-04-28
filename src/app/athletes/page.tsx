@@ -123,16 +123,20 @@ export default function AthletesPage() {
   async function loadFilters() {
     setFilterLoading(true);
 
-    const { data, error: queryError } = await supabase
-      .from("athletes")
-      .select("competition_name,season_year")
-      .not("competition_name", "is", null)
-      .limit(500);
+    const [{ data: athletesData, error: athletesError }, { data: competitionsData, error: competitionsError }] = await Promise.all([
+      supabase
+        .from("athletes")
+        .select("competition_name,season_year")
+        .not("competition_name", "is", null)
+        .limit(500),
+      supabase.from("competitions_registry").select("name").eq("is_active", true),
+    ]);
 
-    if (!queryError) {
-      const rows = (data as Array<{ competition_name: string | null; season_year: number | null }>) ?? [];
+    if (!athletesError && !competitionsError) {
+      const activeCompetitions = (competitionsData as { name: string }[] | null)?.map(c => c.name) ?? [];
+      const rows = (athletesData as Array<{ competition_name: string | null; season_year: number | null }>) ?? [];
       const competitions = Array.from(
-        new Set(rows.map((row) => row.competition_name).filter((value): value is string => !!value))
+        new Set(rows.map((row) => row.competition_name).filter((value): value is string => !!value && activeCompetitions.includes(value)))
       ).sort();
 
       const seasons = Array.from(

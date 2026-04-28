@@ -37,15 +37,19 @@ export default function MatchesPage() {
   useEffect(() => {
     Promise.resolve().then(() => {
       void (async () => {
-        const { data, error: queryError } = await supabase
-          .from("matches")
-          .select("competition_name")
-          .order("competition_name", { ascending: true })
-          .limit(500);
+        const [{ data: matchesData, error: matchesError }, { data: competitionsData, error: competitionsError }] = await Promise.all([
+          supabase
+            .from("matches")
+            .select("competition_name")
+            .order("competition_name", { ascending: true })
+            .limit(500),
+          supabase.from("competitions_registry").select("name").eq("is_active", true),
+        ]);
 
-        if (!queryError) {
+        if (!matchesError && !competitionsError) {
+          const activeCompetitions = (competitionsData as { name: string }[] | null)?.map(c => c.name) ?? [];
           const competitions = Array.from(
-            new Set(((data as Array<{ competition_name: string | null }>) ?? []).map((row) => row.competition_name).filter((value): value is string => !!value))
+            new Set(((matchesData as Array<{ competition_name: string | null }>) ?? []).map((row) => row.competition_name).filter((value): value is string => !!value && activeCompetitions.includes(value)))
           ).sort();
           setCompetitionOptions(competitions);
         }
