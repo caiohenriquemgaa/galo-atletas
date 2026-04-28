@@ -16,6 +16,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { getAthleteSuspensionHistory, getNextMatchSuspensions, type SuspensionMatchInfo } from "@/lib/analytics/suspension";
+import { getNominalTotalMinutesByCompetition } from "@/lib/competitions/matchDuration";
 import { downloadCsv } from "@/lib/export/csv";
 import { supabase } from "@/lib/supabase/client";
 
@@ -33,7 +34,9 @@ type Athlete = {
   is_active_fpf: boolean | null;
 };
 
-type MatchInfo = SuspensionMatchInfo;
+type MatchInfo = SuspensionMatchInfo & {
+  match_duration_minutes?: number | null;
+};
 
 type AthleteStatRow = {
   source: string;
@@ -111,13 +114,13 @@ function sanitizeFilename(value: string) {
 }
 
 function calculatePerformanceScore(input: {
-  totalMinutes: number;
+  durationAdjustedMinutes: number;
   totalGoals: number;
   totalAssists: number;
   totalYellow: number;
   totalRed: number;
 }) {
-  const scoreBase = input.totalMinutes / 90 + input.totalGoals * 5 + input.totalAssists * 3 - input.totalYellow * 1 - input.totalRed * 3;
+  const scoreBase = input.durationAdjustedMinutes + input.totalGoals * 5 + input.totalAssists * 3 - input.totalYellow * 1 - input.totalRed * 3;
   return Math.max(0, Math.min(100, Math.round(scoreBase)));
 }
 
@@ -179,14 +182,14 @@ export default function AthleteProfilePage() {
           supabase
             .from("match_player_stats")
             .select(
-              "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against)"
+              "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against,match_duration_minutes)"
             )
             .eq("athlete_id", athleteId)
             .order("created_at", { ascending: false })
             .limit(1000),
           supabase
             .from("matches")
-            .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against")
+            .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against,match_duration_minutes")
             .order("match_date", { ascending: false }),
         ]);
 
@@ -252,16 +255,24 @@ export default function AthleteProfilePage() {
       }));
   }, [recentRows]);
 
+  const durationAdjustedMinutes = useMemo(() => {
+    return recentRows.reduce((acc, row) => {
+      const match = row.match!;
+      const duration = match.match_duration_minutes ?? getNominalTotalMinutesByCompetition(match.competition_name);
+      return acc + (row.minutes ?? 0) / duration;
+    }, 0);
+  }, [recentRows]);
+
   const performanceScore = useMemo(
     () =>
       calculatePerformanceScore({
-        totalMinutes: kpis.minutes,
+        durationAdjustedMinutes,
         totalGoals: kpis.goals,
         totalAssists: kpis.assists,
         totalYellow: kpis.yellow,
         totalRed: kpis.red,
       }),
-    [kpis]
+    [durationAdjustedMinutes, kpis]
   );
 
   const scoreClassification = useMemo(() => getScoreClassification(performanceScore), [performanceScore]);
@@ -333,7 +344,7 @@ export default function AthleteProfilePage() {
     const { data: exportData, error: exportError } = await supabase
       .from("match_player_stats")
       .select(
-        "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(match_date,opponent,home,goals_for,goals_against,competition_name,season_year,id)"
+        "source,minutes,goals,assists,yellow_cards,red_cards, match:matches(match_date,opponent,home,goals_for,goals_against,competition_name,season_year,id,match_duration_minutes)"
       )
       .eq("athlete_id", athleteId)
       .limit(1000);

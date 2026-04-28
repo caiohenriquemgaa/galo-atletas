@@ -12,6 +12,7 @@ import type {
   CanonicalTeamLineup,
   CanonicalTeamSide,
 } from "@/lib/sumula/types";
+import { getHalfDurationByCompetition, getNominalTotalMinutesByCompetition } from "@/lib/competitions/matchDuration";
 
 type SectionBlock = {
   title: string;
@@ -141,8 +142,8 @@ function parseScore(lines: string[]) {
   return null;
 }
 
-function parseAddedMinutesFromText(input: { text: string; phase: 1 | 2 }) {
-  const baseMinute = input.phase === 1 ? 45 : 90;
+function parseAddedMinutesFromText(input: { text: string; phase: 1 | 2; firstHalfDuration: number; nominalTotalMinutes: number }) {
+  const baseMinute = input.phase === 1 ? input.firstHalfDuration : input.nominalTotalMinutes;
   const phaseTokens = input.phase === 1 ? ["1T", "1 TEMPO", "1º TEMPO", "1O TEMPO"] : ["2T", "2 TEMPO", "2º TEMPO", "2O TEMPO"];
 
   const plusPatterns = phaseTokens.map(
@@ -177,17 +178,24 @@ function parseAddedMinutesFromText(input: { text: string; phase: 1 | 2 }) {
   return null;
 }
 
-function parseMatchClock(sectionLines: string[]) {
+function parseMatchClock(sectionLines: string[], competitionName: string | null) {
   const text = sectionLines.join(" ");
-  const firstHalfAddedMinutes = parseAddedMinutesFromText({ text, phase: 1 });
-  const secondHalfAddedMinutes = parseAddedMinutesFromText({ text, phase: 2 });
+  const firstHalfDuration = getHalfDurationByCompetition(competitionName);
+  const secondHalfDuration = firstHalfDuration;
+  const nominalTotalMinutes = getNominalTotalMinutesByCompetition(competitionName);
+  const firstHalfAddedMinutes = parseAddedMinutesFromText({ text, phase: 1, firstHalfDuration, nominalTotalMinutes });
+  const secondHalfAddedMinutes = parseAddedMinutesFromText({ text, phase: 2, firstHalfDuration, nominalTotalMinutes });
 
   const clock: CanonicalMatchClock = {
+    first_half_duration: firstHalfDuration,
+    second_half_duration: secondHalfDuration,
     first_half_added_minutes: firstHalfAddedMinutes,
     second_half_added_minutes: secondHalfAddedMinutes,
-    nominal_total_minutes: 90,
+    nominal_total_minutes: nominalTotalMinutes,
     official_total_minutes:
-      firstHalfAddedMinutes !== null && secondHalfAddedMinutes !== null ? 90 + firstHalfAddedMinutes + secondHalfAddedMinutes : null,
+      firstHalfAddedMinutes !== null && secondHalfAddedMinutes !== null
+        ? nominalTotalMinutes + firstHalfAddedMinutes + secondHalfAddedMinutes
+        : null,
   };
 
   return clock;
@@ -196,7 +204,6 @@ function parseMatchClock(sectionLines: string[]) {
 function parseMatchMeta(preambleLines: string[], chronologyLines: string[]): CanonicalMatchMeta {
   const teams = extractMatchTeams(preambleLines);
   const score = parseScore(preambleLines);
-  const clock = parseMatchClock(chronologyLines);
 
   const competitionLine =
     preambleLines.find((line) => {
@@ -210,6 +217,8 @@ function parseMatchMeta(preambleLines: string[], chronologyLines: string[]): Can
         /(PARANAENSE|CAMPEONATO|COPA|TORNEIO)/i.test(line)
       );
     }) ?? null;
+  const competitionName = normalizeInlineText(competitionLine) || null;
+  const clock = parseMatchClock(chronologyLines, competitionName);
 
   const roundLine = preambleLines.find((line) => foldForMatch(line).startsWith("FASE:")) ?? null;
   const matchLine = preambleLines.find((line) => foldForMatch(line).startsWith("JOGO Nº")) ?? null;
@@ -219,7 +228,7 @@ function parseMatchMeta(preambleLines: string[], chronologyLines: string[]): Can
     home_team: teams.home_team,
     away_team: teams.away_team,
     final_score: score,
-    competition_name: normalizeInlineText(competitionLine) || null,
+    competition_name: competitionName,
     round_label: normalizeInlineText(roundLine) || null,
     venue: normalizeInlineText(matchMetaMatch?.[2]) || null,
     played_at: normalizeInlineText(matchMetaMatch?.[1]) || null,
@@ -476,13 +485,18 @@ function findAthlete(context: TeamContext, side: CanonicalTeamSide, shirtNumber:
   return null;
 }
 
-function parseTimedWithShirt(line: string) {
+function parseTimedWithShirt(line: string, clock: CanonicalMatchClock) {
   const match = line.match(TIMED_WITH_SHIRT_REGEX);
   if (!match) return null;
 
   const rawPhase = match[2].toUpperCase() as CanonicalCardPhase | CanonicalMatchPhase;
   const half = rawPhase === "2T" || rawPhase === "POS" ? 2 : 1;
-  const minute = rawPhase === "INT" ? 45 : rawPhase === "POS" ? 90 : Number(match[1]);
+  const minute =
+    rawPhase === "INT"
+      ? clock.first_half_duration
+      : rawPhase === "POS"
+        ? clock.official_total_minutes ?? clock.nominal_total_minutes
+        : Number(match[1]);
 
   return {
     half: half as 1 | 2,
@@ -501,12 +515,12 @@ function isSectionBoundary(line: string) {
   return SECTION_HEADER_REGEX.test(line);
 }
 
-function parseSequentialGoals(sectionLines: string[], context: TeamContext) {
+function parseSequentialGoals(sectionLines: string[], context: TeamContext, clock: CanonicalMatchClock) {
   const events: CanonicalReport["events"] = [];
   let i = 0;
 
   while (i < sectionLines.length) {
-    const parsed = parseTimedWithShirt(sectionLines[i]);
+    const parsed = parseTimedWithShirt(sectionLines[i], clock);
     if (!parsed || (parsed.raw_phase !== "1T" && parsed.raw_phase !== "2T")) {
       i += 1;
       continue;
@@ -516,7 +530,7 @@ function parseSequentialGoals(sectionLines: string[], context: TeamContext) {
     const chunk: string[] = [];
     while (
       i < sectionLines.length &&
-      !parseTimedWithShirt(sectionLines[i]) &&
+      !parseTimedWithShirt(sectionLines[i], clock) &&
       !isFootnoteLine(sectionLines[i]) &&
       !isSectionBoundary(sectionLines[i])
     ) {
@@ -548,12 +562,12 @@ function parseSequentialGoals(sectionLines: string[], context: TeamContext) {
   return events;
 }
 
-function parseSequentialCards(sectionLines: string[], context: TeamContext, fallbackCardType: "YELLOW" | "RED") {
+function parseSequentialCards(sectionLines: string[], context: TeamContext, fallbackCardType: "YELLOW" | "RED", clock: CanonicalMatchClock) {
   const events: CanonicalCardEvent[] = [];
   let i = 0;
 
   while (i < sectionLines.length) {
-    const parsed = parseTimedWithShirt(sectionLines[i]);
+    const parsed = parseTimedWithShirt(sectionLines[i], clock);
     if (!parsed) {
       i += 1;
       continue;
@@ -563,7 +577,7 @@ function parseSequentialCards(sectionLines: string[], context: TeamContext, fall
     const chunk: string[] = [];
     while (
       i < sectionLines.length &&
-      !parseTimedWithShirt(sectionLines[i]) &&
+      !parseTimedWithShirt(sectionLines[i], clock) &&
       !isFootnoteLine(sectionLines[i]) &&
       !isSectionBoundary(sectionLines[i])
     ) {
@@ -619,7 +633,7 @@ function parseSubPlayer(lines: string[], startIndex: number) {
   };
 }
 
-function parseSequentialSubstitutions(sectionLines: string[], context: TeamContext) {
+function parseSequentialSubstitutions(sectionLines: string[], context: TeamContext, clock: CanonicalMatchClock) {
   const events: CanonicalSubstitutionEvent[] = [];
   let i = 0;
 
@@ -638,7 +652,7 @@ function parseSequentialSubstitutions(sectionLines: string[], context: TeamConte
 
     const rawPhase = rawPhaseToken as CanonicalSubstitutionPhase;
     const half = rawPhase === "2T" ? 2 : 1;
-    const minute = rawPhase === "INT" ? 45 : Number(header[1]);
+    const minute = rawPhase === "INT" ? clock.first_half_duration : Number(header[1]);
     const teamSide = resolveTeamSide(context, header[3]);
     i += 1;
 
@@ -695,12 +709,16 @@ function parseLinesToCanonical(lines: string[]): CanonicalReport {
     away: buildLineup(lineupEntries, "AWAY", meta.away_team),
   };
   const context = createTeamContext(meta, lineups);
+  const clock = meta.clock;
+  if (!clock) {
+    throw new Error("Match clock could not be parsed.");
+  }
 
   const events = [
-    ...parseSequentialGoals(getSectionLines(sections, "6.0"), context),
-    ...parseSequentialCards(getSectionLines(sections, "7.0"), context, "YELLOW"),
-    ...parseSequentialCards(getSectionLines(sections, "8.0"), context, "RED"),
-    ...parseSequentialSubstitutions(getSectionLines(sections, "11.0"), context),
+    ...parseSequentialGoals(getSectionLines(sections, "6.0"), context, clock),
+    ...parseSequentialCards(getSectionLines(sections, "7.0"), context, "YELLOW", clock),
+    ...parseSequentialCards(getSectionLines(sections, "8.0"), context, "RED", clock),
+    ...parseSequentialSubstitutions(getSectionLines(sections, "11.0"), context, clock),
   ];
 
   return {

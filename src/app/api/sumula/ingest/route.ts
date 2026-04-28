@@ -3,7 +3,20 @@ export const runtime = "nodejs";
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
-import type { CanonicalAthlete, CanonicalReport, IngestDocumentRow, MatchKey } from "@/lib/sumula/types";
+import type {
+  CanonicalAthlete,
+  CanonicalCardEvent,
+  CanonicalCardPhase,
+  CanonicalEvent,
+  CanonicalGoalEvent,
+  CanonicalLineupRole,
+  CanonicalReport,
+  CanonicalSubstitutionEvent,
+  CanonicalSubstitutionPhase,
+  IngestDocumentRow,
+  MatchKey,
+  CanonicalTeamSide,
+} from "@/lib/sumula/types";
 import type { SyncRunRow } from "@/lib/sync/runRoster";
 
 type IngestStage =
@@ -28,12 +41,12 @@ type IngestBody = {
 
 type LineupInsertRow = {
   match_id: string | null;
-  team_side: "HOME" | "AWAY";
+  team_side: CanonicalTeamSide;
   athlete_id: string | null;
   athlete_name_raw: string | null;
   cbf_registry: string | null;
   shirt_number: number | null;
-  role: "STARTER" | "RESERVE";
+  role: CanonicalLineupRole;
   is_captain: boolean;
   source: string;
   document_id: string;
@@ -43,7 +56,7 @@ type LineupInsertRow = {
 
 type GoalInsertRow = {
   match_id: string | null;
-  team_side: "HOME" | "AWAY";
+  team_side: CanonicalTeamSide;
   athlete_id: string | null;
   athlete_name_raw: string | null;
   cbf_registry: string | null;
@@ -59,11 +72,13 @@ type GoalInsertRow = {
 
 type CardInsertRow = {
   match_id: string | null;
-  team_side: "HOME" | "AWAY";
+  team_side: CanonicalTeamSide;
   athlete_id: string | null;
   athlete_name_raw: string | null;
+  shirt_number: number | null;
   half: 1 | 2;
   minute: number;
+  raw_phase: CanonicalCardPhase;
   card_type: "YELLOW" | "RED" | "SECOND_YELLOW";
   reason: string | null;
   source: string;
@@ -74,13 +89,16 @@ type CardInsertRow = {
 
 type SubstitutionInsertRow = {
   match_id: string | null;
-  team_side: "HOME" | "AWAY";
+  team_side: CanonicalTeamSide;
   half: 1 | 2;
   minute: number;
+  raw_phase: CanonicalSubstitutionPhase;
   athlete_out_id: string | null;
   athlete_in_id: string | null;
   athlete_out_name_raw: string | null;
   athlete_in_name_raw: string | null;
+  athlete_out_shirt_number: number | null;
+  athlete_in_shirt_number: number | null;
   source: string;
   document_id: string;
   match_key: MatchKey;
@@ -92,6 +110,8 @@ type CanonicalEventMap = {
   cards: CardInsertRow[];
   substitutions: SubstitutionInsertRow[];
 };
+
+const INGEST_SOURCE = "FPF_SUMULA_CANONICAL";
 
 function isAuthorized(request: Request) {
   const headerSecret = request.headers.get("x-cron-secret");
@@ -111,162 +131,272 @@ function stableEventUid(kind: string, matchKey: string, fields: Array<string | n
   return createHash("sha256").update(payload).digest("hex");
 }
 
-function normalizeName(value: string) {
+function normalizeName(value: string | null | undefined) {
+  if (!value) return "";
   return value.replace(/\s+/g, " ").trim();
+}
+
+function isLineupRole(value: unknown): value is CanonicalLineupRole {
+  return value === "STARTER" || value === "RESERVE" || value === "GK_STARTER" || value === "GK_RESERVE";
+}
+
+function isTeamSide(value: unknown): value is CanonicalTeamSide {
+  return value === "HOME" || value === "AWAY";
+}
+
+function isGoalEvent(value: unknown): value is CanonicalGoalEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CanonicalGoalEvent>;
+  return (
+    candidate.type === "GOAL" &&
+    isTeamSide(candidate.team_side) &&
+    (candidate.half === 1 || candidate.half === 2) &&
+    typeof candidate.minute === "number" &&
+    (candidate.raw_phase === "1T" || candidate.raw_phase === "2T") &&
+    typeof candidate.athlete_name === "string"
+  );
+}
+
+function isCardEvent(value: unknown): value is CanonicalCardEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CanonicalCardEvent>;
+  return (
+    candidate.type === "CARD" &&
+    isTeamSide(candidate.team_side) &&
+    (candidate.half === 1 || candidate.half === 2) &&
+    typeof candidate.minute === "number" &&
+    (candidate.raw_phase === "1T" || candidate.raw_phase === "2T" || candidate.raw_phase === "INT" || candidate.raw_phase === "POS") &&
+    typeof candidate.athlete_name === "string" &&
+    (candidate.card_type === "YELLOW" || candidate.card_type === "RED" || candidate.card_type === "SECOND_YELLOW")
+  );
+}
+
+function isSubstitutionEvent(value: unknown): value is CanonicalSubstitutionEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CanonicalSubstitutionEvent>;
+  return (
+    candidate.type === "SUBSTITUTION" &&
+    isTeamSide(candidate.team_side) &&
+    (candidate.half === 1 || candidate.half === 2) &&
+    typeof candidate.minute === "number" &&
+    (candidate.raw_phase === "1T" || candidate.raw_phase === "2T" || candidate.raw_phase === "INT") &&
+    typeof candidate.athlete_out_name === "string" &&
+    typeof candidate.athlete_in_name === "string"
+  );
+}
+
+function isCanonicalAthlete(value: unknown): value is CanonicalAthlete {
+  if (!value || typeof value !== "object") return false;
+  const athlete = value as Partial<CanonicalAthlete>;
+  return typeof athlete.name === "string" && (athlete.shirt_number === null || typeof athlete.shirt_number === "number");
 }
 
 function parseCanonical(input: unknown): CanonicalReport | null {
   if (!input || typeof input !== "object") return null;
+
   const parsed = input as Partial<CanonicalReport>;
   if (!parsed.match_meta || !parsed.lineups || !Array.isArray(parsed.events)) return null;
   if (!parsed.lineups.home || !parsed.lineups.away) return null;
   if (!Array.isArray(parsed.lineups.home.starters) || !Array.isArray(parsed.lineups.home.reserves)) return null;
   if (!Array.isArray(parsed.lineups.away.starters) || !Array.isArray(parsed.lineups.away.reserves)) return null;
+
+  const athletes = [
+    ...parsed.lineups.home.starters,
+    ...parsed.lineups.home.reserves,
+    ...parsed.lineups.away.starters,
+    ...parsed.lineups.away.reserves,
+  ];
+
+  if (!athletes.every((athlete) => isCanonicalAthlete(athlete))) return null;
+  if (!parsed.events.every((event) => isGoalEvent(event) || isCardEvent(event) || isSubstitutionEvent(event))) return null;
+
   return parsed as CanonicalReport;
 }
 
-function parseHalf(input: unknown): 1 | 2 | null {
-  if (input === 1 || input === "1") return 1;
-  if (input === 2 || input === "2") return 2;
-  return null;
-}
-
-function parseMinute(input: unknown): number | null {
-  if (typeof input === "number" && Number.isFinite(input) && input >= 0) return Math.floor(input);
-  if (typeof input === "string" && /^\d{1,3}$/.test(input.trim())) return Number(input.trim());
-  return null;
-}
-
-function parseTeamSide(input: unknown): "HOME" | "AWAY" | null {
-  if (input === "HOME" || input === "AWAY") return input;
-  if (typeof input === "string") {
-    const upper = input.toUpperCase().trim();
-    if (upper === "HOME" || upper === "AWAY") return upper;
-  }
-  return null;
-}
-
-function parseCanonicalEvents(input: {
-  events: unknown[];
-  documentId: string;
-  matchId: string | null;
-  matchKey: MatchKey;
-}): CanonicalEventMap {
-  const goals: GoalInsertRow[] = [];
-  const cards: CardInsertRow[] = [];
-  const substitutions: SubstitutionInsertRow[] = [];
-
-  for (const raw of input.events) {
-    if (!raw || typeof raw !== "object") continue;
-    const event = raw as Record<string, unknown>;
-    const eventType = typeof event.type === "string" ? event.type.toUpperCase().trim() : "";
-    const teamSide = parseTeamSide(event.team_side);
-    const half = parseHalf(event.half);
-    const minute = parseMinute(event.minute);
-    if (!teamSide || !half || minute === null) continue;
-
-    if (eventType === "GOAL") {
-      const athleteName = typeof event.athlete_name === "string" ? normalizeName(event.athlete_name) : "";
-      const shirtNumber = typeof event.shirt_number === "number" ? event.shirt_number : null;
-      const kind = typeof event.kind === "string" && event.kind.trim() ? event.kind.trim().toUpperCase() : "GOAL";
-      goals.push({
-        match_id: input.matchId,
-        team_side: teamSide,
-        athlete_id: null,
-        athlete_name_raw: athleteName || null,
-        cbf_registry: typeof event.cbf_registry === "string" ? event.cbf_registry.trim() || null : null,
-        shirt_number: shirtNumber,
-        half,
-        minute,
-        kind,
-        source: "FPF_SUMULA_CANONICAL",
-        document_id: input.documentId,
-        match_key: input.matchKey,
-        event_uid: stableEventUid("goal", input.matchKey, [teamSide, half, minute, kind, athleteName || ""]),
-      });
-      continue;
-    }
-
-    if (eventType === "CARD") {
-      const cardTypeCandidate = typeof event.card_type === "string" ? event.card_type.toUpperCase().trim() : "";
-      if (cardTypeCandidate !== "YELLOW" && cardTypeCandidate !== "RED" && cardTypeCandidate !== "SECOND_YELLOW") {
-        continue;
-      }
-      const athleteName = typeof event.athlete_name === "string" ? normalizeName(event.athlete_name) : "";
-      const reason = typeof event.reason === "string" ? normalizeName(event.reason) : null;
-      cards.push({
-        match_id: input.matchId,
-        team_side: teamSide,
-        athlete_id: null,
-        athlete_name_raw: athleteName || null,
-        half,
-        minute,
-        card_type: cardTypeCandidate,
-        reason: reason || null,
-        source: "FPF_SUMULA_CANONICAL",
-        document_id: input.documentId,
-        match_key: input.matchKey,
-        event_uid: stableEventUid("card", input.matchKey, [teamSide, half, minute, cardTypeCandidate, athleteName || "", reason || ""]),
-      });
-      continue;
-    }
-
-    if (eventType === "SUBSTITUTION") {
-      const athleteOut = typeof event.athlete_out_name === "string" ? normalizeName(event.athlete_out_name) : "";
-      const athleteIn = typeof event.athlete_in_name === "string" ? normalizeName(event.athlete_in_name) : "";
-      if (!athleteOut || !athleteIn) continue;
-      substitutions.push({
-        match_id: input.matchId,
-        team_side: teamSide,
-        half,
-        minute,
-        athlete_out_id: null,
-        athlete_in_id: null,
-        athlete_out_name_raw: athleteOut,
-        athlete_in_name_raw: athleteIn,
-        source: "FPF_SUMULA_CANONICAL",
-        document_id: input.documentId,
-        match_key: input.matchKey,
-        event_uid: stableEventUid("substitution", input.matchKey, [teamSide, half, minute, athleteOut, athleteIn]),
-      });
-    }
-  }
-
-  return { goals, cards, substitutions };
+function lineupRoleFromAthlete(athlete: CanonicalAthlete, fallback: CanonicalLineupRole) {
+  return isLineupRole(athlete.role) ? athlete.role : fallback;
 }
 
 function toLineupRows(input: {
   documentId: string;
   matchId: string | null;
   matchKey: MatchKey;
-  side: "HOME" | "AWAY";
-  role: "STARTER" | "RESERVE";
+  side: CanonicalTeamSide;
+  fallbackRole: CanonicalLineupRole;
   athletes: CanonicalAthlete[];
 }) {
   return input.athletes
     .map((athlete) => {
-      const athleteName = normalizeName(athlete.name ?? "");
+      const athleteName = normalizeName(athlete.full_name ?? athlete.name);
       if (!athleteName) return null;
 
-      const uid = stableEventUid("lineup", input.matchKey, [input.side, input.role, athleteName, athlete.shirt_number ?? "", false]);
+      const role = lineupRoleFromAthlete(athlete, input.fallbackRole);
+      const uid = stableEventUid("lineup", input.matchKey, [
+        input.side,
+        role,
+        athleteName,
+        athlete.shirt_number ?? "",
+        athlete.cbf_registry ?? "",
+        athlete.is_captain ?? false,
+      ]);
 
       const row: LineupInsertRow = {
         match_id: input.matchId,
         team_side: input.side,
         athlete_id: null,
         athlete_name_raw: athleteName,
-        cbf_registry: null,
+        cbf_registry: athlete.cbf_registry ?? null,
         shirt_number: athlete.shirt_number ?? null,
-        role: input.role,
-        is_captain: false,
-        source: "FPF_SUMULA_CANONICAL",
+        role,
+        is_captain: athlete.is_captain ?? false,
+        source: INGEST_SOURCE,
         document_id: input.documentId,
         match_key: input.matchKey,
         event_uid: uid,
       };
+
       return row;
     })
     .filter((row): row is LineupInsertRow => row !== null);
+}
+
+function mapGoalEvent(input: {
+  event: CanonicalGoalEvent;
+  documentId: string;
+  matchId: string | null;
+  matchKey: MatchKey;
+}) {
+  const athleteName = normalizeName(input.event.athlete_name);
+  if (!athleteName) return null;
+
+  const row: GoalInsertRow = {
+    match_id: input.matchId,
+    team_side: input.event.team_side,
+    athlete_id: null,
+    athlete_name_raw: athleteName,
+    cbf_registry: input.event.cbf_registry ?? null,
+    shirt_number: input.event.shirt_number ?? null,
+    half: input.event.half,
+    minute: input.event.minute,
+    kind: input.event.kind,
+    source: INGEST_SOURCE,
+    document_id: input.documentId,
+    match_key: input.matchKey,
+    event_uid: stableEventUid("goal", input.matchKey, [
+      input.event.team_side,
+      input.event.raw_phase,
+      input.event.half,
+      input.event.minute,
+      athleteName,
+      input.event.shirt_number ?? "",
+      input.event.cbf_registry ?? "",
+      input.event.kind,
+    ]),
+  };
+
+  return row;
+}
+
+function mapCardEvent(input: {
+  event: CanonicalCardEvent;
+  documentId: string;
+  matchId: string | null;
+  matchKey: MatchKey;
+}) {
+  const athleteName = normalizeName(input.event.athlete_name);
+  if (!athleteName) return null;
+
+  const row: CardInsertRow = {
+    match_id: input.matchId,
+    team_side: input.event.team_side,
+    athlete_id: null,
+    athlete_name_raw: athleteName,
+    shirt_number: input.event.shirt_number ?? null,
+    half: input.event.half,
+    minute: input.event.minute,
+    raw_phase: input.event.raw_phase,
+    card_type: input.event.card_type,
+    reason: normalizeName(input.event.reason) || null,
+    source: INGEST_SOURCE,
+    document_id: input.documentId,
+    match_key: input.matchKey,
+    event_uid: stableEventUid("card", input.matchKey, [
+      input.event.team_side,
+      input.event.raw_phase,
+      input.event.half,
+      input.event.minute,
+      athleteName,
+      input.event.shirt_number ?? "",
+      input.event.card_type,
+      normalizeName(input.event.reason) || "",
+    ]),
+  };
+
+  return row;
+}
+
+function mapSubstitutionEvent(input: {
+  event: CanonicalSubstitutionEvent;
+  documentId: string;
+  matchId: string | null;
+  matchKey: MatchKey;
+}) {
+  const athleteOutName = normalizeName(input.event.athlete_out_name);
+  const athleteInName = normalizeName(input.event.athlete_in_name);
+  if (!athleteOutName || !athleteInName) return null;
+
+  const row: SubstitutionInsertRow = {
+    match_id: input.matchId,
+    team_side: input.event.team_side,
+    half: input.event.half,
+    minute: input.event.minute,
+    raw_phase: input.event.raw_phase,
+    athlete_out_id: null,
+    athlete_in_id: null,
+    athlete_out_name_raw: athleteOutName,
+    athlete_in_name_raw: athleteInName,
+    athlete_out_shirt_number: input.event.athlete_out_shirt_number ?? null,
+    athlete_in_shirt_number: input.event.athlete_in_shirt_number ?? null,
+    source: INGEST_SOURCE,
+    document_id: input.documentId,
+    match_key: input.matchKey,
+    event_uid: stableEventUid("substitution", input.matchKey, [
+      input.event.team_side,
+      input.event.raw_phase,
+      input.event.half,
+      input.event.minute,
+      athleteOutName,
+      input.event.athlete_out_shirt_number ?? "",
+      athleteInName,
+      input.event.athlete_in_shirt_number ?? "",
+    ]),
+  };
+
+  return row;
+}
+
+function parseCanonicalEvents(input: {
+  events: CanonicalEvent[];
+  documentId: string;
+  matchId: string | null;
+  matchKey: MatchKey;
+}): CanonicalEventMap {
+  const goals = input.events
+    .filter((event): event is CanonicalGoalEvent => event.type === "GOAL")
+    .map((event) => mapGoalEvent({ event, ...input }))
+    .filter((row): row is GoalInsertRow => row !== null);
+
+  const cards = input.events
+    .filter((event): event is CanonicalCardEvent => event.type === "CARD")
+    .map((event) => mapCardEvent({ event, ...input }))
+    .filter((row): row is CardInsertRow => row !== null);
+
+  const substitutions = input.events
+    .filter((event): event is CanonicalSubstitutionEvent => event.type === "SUBSTITUTION")
+    .map((event) => mapSubstitutionEvent({ event, ...input }))
+    .filter((row): row is SubstitutionInsertRow => row !== null);
+
+  return { goals, cards, substitutions };
 }
 
 export async function POST(request: Request) {
@@ -350,7 +480,6 @@ export async function POST(request: Request) {
       supabase.from("match_substitutions").delete().eq("match_key", matchKey),
       supabase.from("match_lineups").delete().eq("match_key", matchKey),
     ];
-
     const deleteResults = await Promise.all(deleteRequests);
     const deleteError = deleteResults.find((result) => result.error)?.error;
     if (deleteError) {
@@ -363,7 +492,7 @@ export async function POST(request: Request) {
         matchId,
         matchKey,
         side: "HOME",
-        role: "STARTER",
+        fallbackRole: "STARTER",
         athletes: canonical.lineups.home.starters,
       }),
       ...toLineupRows({
@@ -371,7 +500,7 @@ export async function POST(request: Request) {
         matchId,
         matchKey,
         side: "HOME",
-        role: "RESERVE",
+        fallbackRole: "RESERVE",
         athletes: canonical.lineups.home.reserves,
       }),
       ...toLineupRows({
@@ -379,7 +508,7 @@ export async function POST(request: Request) {
         matchId,
         matchKey,
         side: "AWAY",
-        role: "STARTER",
+        fallbackRole: "STARTER",
         athletes: canonical.lineups.away.starters,
       }),
       ...toLineupRows({
@@ -387,7 +516,7 @@ export async function POST(request: Request) {
         matchId,
         matchKey,
         side: "AWAY",
-        role: "RESERVE",
+        fallbackRole: "RESERVE",
         athletes: canonical.lineups.away.reserves,
       }),
     ];

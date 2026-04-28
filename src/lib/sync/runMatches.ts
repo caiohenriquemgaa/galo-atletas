@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getNominalTotalMinutesByCompetition } from "@/lib/competitions/matchDuration";
 import { fetchCompetitionMatchesWithDebug, fetchMatchDetails } from "@/lib/sync/fpf/adapter";
 import { linkAthlete } from "@/lib/linking/linkAthlete";
 import { syncFinishedMatchReport } from "@/lib/sumula/syncFinishedMatchReport";
@@ -49,6 +50,7 @@ type MatchImportRow = {
   referee: string | null;
   home_team: string | null;
   away_team: string | null;
+  match_duration_minutes: number;
 };
 
 type UpsertedMatchRow = {
@@ -359,6 +361,7 @@ function toMatchUpdateRow(row: MatchImportRow) {
     referee: row.referee,
     home_team: row.home_team,
     away_team: row.away_team,
+    match_duration_minutes: row.match_duration_minutes,
     competition_registry_id: row.competition_registry_id,
   };
 }
@@ -531,6 +534,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
           referee: details?.referee ?? null,
           home_team: resolvedHomeTeam,
           away_team: resolvedAwayTeam,
+          match_duration_minutes: getNominalTotalMinutesByCompetition(competition.name),
         }];
       });
 
@@ -550,6 +554,7 @@ export async function runMatchesSync(options: SyncRunOptions = {}): Promise<{ sy
             referee: row.referee,
             home_team: row.home_team,
             away_team: row.away_team,
+            match_duration_minutes: row.match_duration_minutes,
           }))
           .sort((a, b) => (a.source_url > b.source_url ? 1 : -1))
       );
@@ -886,6 +891,7 @@ export async function processPendingMatchesSync(
               processed_at: new Date().toISOString(),
               processing_error: null,
               parser_used: reportResult.parser_used,
+              match_duration_minutes: getNominalTotalMinutesByCompetition(match.competition_name),
             })
             .eq("id", match.id);
 

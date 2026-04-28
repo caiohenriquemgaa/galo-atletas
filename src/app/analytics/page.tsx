@@ -8,8 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/components/ui/use-toast";
 import { getAthleteSuspensionHistory, getNextMatchSuspensions, type SuspensionMatchInfo } from "@/lib/analytics/suspension";
+import { getNominalTotalMinutesByCompetition } from "@/lib/competitions/matchDuration";
 import { downloadCsv } from "@/lib/export/csv";
-import { supabase } from "@/lib/supabase/client";
 
 type Athlete = {
   id: string;
@@ -17,8 +17,11 @@ type Athlete = {
 };
 
 type MatchInfo = SuspensionMatchInfo;
+type AnalyticsMatchInfo = MatchInfo & {
+  match_duration_minutes?: number | null;
+};
 
-type MatchRelation = MatchInfo | MatchInfo[] | null;
+type MatchRelation = AnalyticsMatchInfo | AnalyticsMatchInfo[] | null;
 
 type StatsRow = {
   athlete_id: string | null;
@@ -31,6 +34,15 @@ type StatsRow = {
   match: MatchRelation;
 };
 
+type AnalyticsApiResponse = {
+  athletes: Athlete[];
+  statsRows: StatsRow[];
+  matches: AnalyticsMatchInfo[];
+  competitionOptions: string[];
+  seasonOptions: string[];
+  error?: string;
+};
+
 type AnalyticsRow = {
   athleteId: string;
   name: string;
@@ -41,6 +53,7 @@ type AnalyticsRow = {
   totalYellow: number;
   totalRed: number;
   totalCards: number;
+  durationAdjustedMinutes: number;
   score: number;
 };
 
@@ -57,25 +70,39 @@ type SuspensionRiskView = {
   yellowCountInCycle: number;
 };
 
-function pickMatch(match: MatchRelation): MatchInfo | null {
+function pickMatch(match: MatchRelation): AnalyticsMatchInfo | null {
   if (!match) return null;
   return Array.isArray(match) ? (match[0] ?? null) : match;
 }
 
+function normalizeFilterValue(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function matchesCompetitionFilter(matchCompetition: string, selectedCompetition: string) {
+  if (selectedCompetition === "ALL") return true;
+  if (matchCompetition === selectedCompetition) return true;
+  return normalizeFilterValue(matchCompetition) === normalizeFilterValue(selectedCompetition);
+}
+
 function isCompletedStatRow(row: StatsRow & { match: MatchInfo | null }) {
-  if (!row.match) return false;
-  if (row.source !== "MOCK") return true;
-  return row.minutes !== null && row.minutes > 0;
+  return !!row.match;
 }
 
 function calculatePerformanceScore(input: {
-  totalMinutes: number;
+  durationAdjustedMinutes: number;
   totalGoals: number;
   totalAssists: number;
   totalYellow: number;
   totalRed: number;
 }) {
-  return input.totalGoals * 4 + input.totalAssists * 3 + input.totalMinutes / 90 - input.totalYellow * 1 - input.totalRed * 3;
+  return input.totalGoals * 4 + input.totalAssists * 3 + input.durationAdjustedMinutes - input.totalYellow * 1 - input.totalRed * 3;
 }
 
 function formatScore(value: number) {
@@ -141,7 +168,7 @@ export default function AnalyticsPage() {
 
   const [athletesById, setAthletesById] = useState<Record<string, string>>({});
   const [statsRows, setStatsRows] = useState<StatsRow[]>([]);
-  const [matches, setMatches] = useState<MatchInfo[]>([]);
+  const [matches, setMatches] = useState<AnalyticsMatchInfo[]>([]);
 
   const [competitionOptions, setCompetitionOptions] = useState<string[]>([]);
   const [seasonOptions, setSeasonOptions] = useState<string[]>([]);
@@ -156,22 +183,15 @@ export default function AnalyticsPage() {
         setLoading(true);
         setError(null);
 
-        const [{ data: athletesData, error: athletesError }, { data: statsData, error: statsError }, { data: matchesData, error: matchesError }] =
-          await Promise.all([
-            supabase.from("athletes").select("id,name"),
-            supabase
-              .from("match_player_stats")
-              .select(
-                "athlete_id,source,minutes,goals,assists,yellow_cards,red_cards,match:matches(id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against)"
-              ),
-            supabase
-              .from("matches")
-              .select("id,competition_name,season_year,match_date,opponent,home,goals_for,goals_against")
-              .order("match_date", { ascending: false }),
-          ]);
+        const params = new URLSearchParams({
+          competition: competitionFilter,
+          season: seasonFilter,
+        });
+        const response = await fetch(`/api/analytics?${params.toString()}`, { cache: "no-store" });
+        const payload = (await response.json()) as AnalyticsApiResponse;
 
-        if (athletesError || statsError || matchesError) {
-          setError("Nao foi possivel carregar os dados de analytics.");
+        if (!response.ok || payload.error) {
+          setError(payload.error ?? "Nao foi possivel carregar os dados de analytics.");
           setStatsRows([]);
           setMatches([]);
           setAthletesById({});
@@ -179,35 +199,24 @@ export default function AnalyticsPage() {
           return;
         }
 
-        const athletes = (athletesData as Athlete[]) ?? [];
-        const stats = (statsData as StatsRow[]) ?? [];
-        const loadedMatches = (matchesData as MatchInfo[]) ?? [];
-
-        const athleteMap = athletes.reduce<Record<string, string>>((acc, athlete) => {
+        const athleteMap = payload.athletes.reduce<Record<string, string>>((acc, athlete) => {
           acc[athlete.id] = athlete.name;
           return acc;
         }, {});
 
-        const competitions = Array.from(new Set(loadedMatches.map((row) => row.competition_name).filter((value): value is string => !!value))).sort();
-        const seasons = Array.from(
-          new Set(loadedMatches.map((row) => row.season_year).filter((value): value is number => Number.isFinite(value)))
-        )
-          .sort((a, b) => b - a)
-          .map((value) => String(value));
-
         setAthletesById(athleteMap);
-        setStatsRows(stats);
-        setMatches(loadedMatches);
-        setCompetitionOptions(competitions);
-        setSeasonOptions(seasons);
+        setStatsRows(payload.statsRows);
+        setMatches(payload.matches);
+        setCompetitionOptions(payload.competitionOptions);
+        setSeasonOptions(payload.seasonOptions);
         setLoading(false);
       })();
     });
-  }, []);
+  }, [competitionFilter, seasonFilter]);
 
   const filteredMatches = useMemo(() => {
     return matches.filter((match) => {
-      if (competitionFilter !== "ALL" && match.competition_name !== competitionFilter) return false;
+      if (!matchesCompetitionFilter(match.competition_name, competitionFilter)) return false;
       if (seasonFilter !== "ALL" && String(match.season_year) !== seasonFilter) return false;
       return true;
     });
@@ -217,9 +226,9 @@ export default function AnalyticsPage() {
     () =>
       statsRows
         .map((row) => ({ ...row, match: pickMatch(row.match) }))
-        .filter((row): row is StatsRow & { match: MatchInfo } => {
+        .filter((row): row is StatsRow & { match: AnalyticsMatchInfo } => {
           if (!row.match) return false;
-          if (competitionFilter !== "ALL" && row.match.competition_name !== competitionFilter) return false;
+          if (!matchesCompetitionFilter(row.match.competition_name, competitionFilter)) return false;
           if (seasonFilter !== "ALL" && String(row.match.season_year) !== seasonFilter) return false;
           return isCompletedStatRow(row);
         }),
@@ -246,6 +255,7 @@ export default function AnalyticsPage() {
           totalYellow: 0,
           totalRed: 0,
           totalCards: 0,
+          durationAdjustedMinutes: 0,
           score: 0,
         });
       }
@@ -258,12 +268,14 @@ export default function AnalyticsPage() {
       item.totalYellow += stat.yellow_cards ?? 0;
       item.totalRed += stat.red_cards ?? 0;
       item.totalCards = item.totalYellow + item.totalRed;
+      const duration = stat.match.match_duration_minutes ?? getNominalTotalMinutesByCompetition(stat.match.competition_name);
+      item.durationAdjustedMinutes += (stat.minutes ?? 0) / duration;
     }
 
     const aggregated = Array.from(grouped.values()).map((item) => ({
       ...item,
       score: calculatePerformanceScore({
-        totalMinutes: item.totalMinutes,
+        durationAdjustedMinutes: item.durationAdjustedMinutes,
         totalGoals: item.totalGoals,
         totalAssists: item.totalAssists,
         totalYellow: item.totalYellow,
@@ -422,6 +434,21 @@ export default function AnalyticsPage() {
     const season = seasonFilter === "ALL" ? "todas as temporadas" : seasonFilter;
     return `${competition} (${season})`;
   }, [competitionFilter, seasonFilter]);
+
+  const emptyDataLabel = useMemo(() => {
+    const competition = competitionFilter === "ALL" ? "Todas" : competitionFilter;
+    const season = seasonFilter === "ALL" ? "Todas" : seasonFilter;
+    return `${competition} / ${season}`;
+  }, [competitionFilter, seasonFilter]);
+
+  const scoreFormulaLabel = useMemo(() => {
+    const duration =
+      competitionFilter === "ALL"
+        ? null
+        : filteredMatches[0]?.match_duration_minutes ?? getNominalTotalMinutesByCompetition(competitionFilter);
+    const minutesTerm = duration ? `minutes/${duration}` : "minutes/duracao_do_jogo";
+    return `score = (goals*4) + (assists*3) + (${minutesTerm}) - (yellow*1) - (red*3)`;
+  }, [competitionFilter, filteredMatches]);
 
   function handleExportCardsCsv() {
     if (cardControlCsvRows.length === 0) {
@@ -597,7 +624,7 @@ export default function AnalyticsPage() {
           <CardHeader>
             <CardTitle>Nenhuma estatistica encontrada</CardTitle>
             <CardDescription>
-              Ainda nao ha dados em <code>match_player_stats</code> para os filtros selecionados.
+              Nenhuma estatística encontrada para: {emptyDataLabel}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -657,7 +684,7 @@ export default function AnalyticsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Ranking Top 10 por Performance Score</CardTitle>
-              <CardDescription>score = (goals*4) + (assists*3) + (minutes/90) - (yellow*1) - (red*3)</CardDescription>
+              <CardDescription>{scoreFormulaLabel}</CardDescription>
             </CardHeader>
             <CardContent>
               <Table>

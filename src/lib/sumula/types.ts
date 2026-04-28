@@ -87,9 +87,11 @@ export type CanonicalSubstitutionEvent = {
 };
 
 export type CanonicalMatchClock = {
+  first_half_duration: number;
+  second_half_duration: number;
   first_half_added_minutes: number | null;
   second_half_added_minutes: number | null;
-  nominal_total_minutes: 90;
+  nominal_total_minutes: number;
   official_total_minutes: number | null;
 };
 

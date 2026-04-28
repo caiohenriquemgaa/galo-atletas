@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/components/ui/use-toast";
+import { normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
 
 type CompetitionCategory = "PROFISSIONAL" | "BASE";
 
@@ -33,7 +34,7 @@ const DEFAULT_COMPETITION = {
   name: "Paranaense Sub-20 2026 - 1ª Divisão",
   category: "BASE" as CompetitionCategory,
   season_year: 2026,
-  url_base: "https://federacaopr.com.br/competicoes/Estadual/2026/47",
+  url_base: "https://federacaopr.com.br/campeonato/base/2026/47/",
   is_active: true,
 };
 
@@ -139,7 +140,8 @@ export default function CompetitionsPage() {
       name: form.name.trim(),
       category: form.category,
       season_year: parsedSeason,
-      url_base: form.url_base.trim() || null,
+      // Store the canonical championship URL so the sync stays compatible with the current FPF site.
+      url_base: normalizeCompetitionUrlBase(form.url_base, form.category),
       is_active: form.is_active,
     };
 
@@ -268,7 +270,7 @@ export default function CompetitionsPage() {
               <Input
                 value={form.url_base}
                 onChange={(event) => setForm((prev) => ({ ...prev, url_base: event.target.value }))}
-                placeholder="https://federacaopr.com.br/competicoes/..."
+                placeholder="https://federacaopr.com.br/campeonato/base/2026/47/"
               />
             </label>
 

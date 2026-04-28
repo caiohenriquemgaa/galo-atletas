@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getHalfDurationByCompetition, getNominalTotalMinutesByCompetition } from "@/lib/competitions/matchDuration";
 import { linkAthlete } from "@/lib/linking/linkAthlete";
 import type { Database } from "@/lib/supabase/database.types";
 import type { CanonicalCardPhase, CanonicalSubstitutionPhase, MatchKey } from "@/lib/sumula/types";
@@ -58,11 +59,20 @@ type SubstitutionRow = {
 type MatchClockDocumentRow = {
   canonical_json: {
     match_meta?: {
+      competition_name?: string | null;
       clock?: {
+        first_half_duration?: number | null;
+        second_half_duration?: number | null;
+        nominal_total_minutes?: number | null;
         official_total_minutes?: number | null;
       } | null;
     } | null;
   } | null;
+};
+
+type MatchDurationRow = {
+  competition_name: string | null;
+  match_duration_minutes: number | null;
 };
 
 type PlayerInterval = {
@@ -132,24 +142,31 @@ function clampMinute(value: number, totalMinutes: number) {
   return Math.max(0, Math.min(totalMinutes, Math.floor(value)));
 }
 
-function getMatchTotalMinutes(input: { officialTotalMinutes: number | null; strategy?: "default" | "official" }) {
-  // For now the product rule is still "close at 90", but the helper already supports switching to official time later.
-  if (input.strategy === "official" && typeof input.officialTotalMinutes === "number" && input.officialTotalMinutes >= 90) {
+function getMatchTotalMinutes(input: {
+  officialTotalMinutes: number | null;
+  matchDurationMinutes: number | null;
+  competitionName: string | null;
+}) {
+  if (typeof input.officialTotalMinutes === "number" && input.officialTotalMinutes > 0) {
     return input.officialTotalMinutes;
   }
-  return 90;
+  if (typeof input.matchDurationMinutes === "number" && input.matchDurationMinutes > 0) {
+    return input.matchDurationMinutes;
+  }
+  return getNominalTotalMinutesByCompetition(input.competitionName);
 }
 
 function toAbsoluteMinute(input: {
   half: number;
   minute: number;
   rawPhase?: CanonicalCardPhase | CanonicalSubstitutionPhase | null;
+  firstHalfDuration: number;
   totalMinutes: number;
 }) {
-  if (input.rawPhase === "INT") return 45;
+  if (input.rawPhase === "INT") return input.firstHalfDuration;
   if (input.rawPhase === "POS") return input.totalMinutes;
 
-  const baseOffset = input.half === 2 ? 45 : 0;
+  const baseOffset = input.half === 2 ? input.firstHalfDuration : 0;
   return clampMinute(baseOffset + Math.max(0, input.minute), input.totalMinutes);
 }
 
@@ -356,7 +373,7 @@ export async function rebuildPlayerStats(
     match_id: string | null;
   }
 ): Promise<RebuildPlayerStatsResult> {
-  const [lineupsRes, goalsRes, cardsRes, substitutionsRes, documentRes] = await Promise.all([
+  const [lineupsRes, goalsRes, cardsRes, substitutionsRes, documentRes, matchRes] = await Promise.all([
     supabase
       .from("match_lineups")
       .select("match_id,team_side,athlete_id,athlete_name_raw,cbf_registry,shirt_number,role,is_captain")
@@ -378,15 +395,19 @@ export async function rebuildPlayerStats(
     input.document_id
       ? supabase.from("documents").select("canonical_json").eq("id", input.document_id).maybeSingle<MatchClockDocumentRow>()
       : Promise.resolve({ data: null, error: null }),
+    input.match_id
+      ? supabase.from("matches").select("competition_name,match_duration_minutes").eq("id", input.match_id).maybeSingle<MatchDurationRow>()
+      : Promise.resolve({ data: null, error: null }),
   ]);
 
-  if (lineupsRes.error || goalsRes.error || cardsRes.error || substitutionsRes.error || documentRes.error) {
+  if (lineupsRes.error || goalsRes.error || cardsRes.error || substitutionsRes.error || documentRes.error || matchRes.error) {
     throw new Error(
       lineupsRes.error?.message ??
         goalsRes.error?.message ??
         cardsRes.error?.message ??
         substitutionsRes.error?.message ??
         documentRes.error?.message ??
+        matchRes.error?.message ??
         "Could not load events."
     );
   }
@@ -395,8 +416,15 @@ export async function rebuildPlayerStats(
   const goals = (goalsRes.data as GoalRow[] | null) ?? [];
   const cards = (cardsRes.data as CardRow[] | null) ?? [];
   const substitutions = (substitutionsRes.data as SubstitutionRow[] | null) ?? [];
-  const officialTotalMinutes = documentRes.data?.canonical_json?.match_meta?.clock?.official_total_minutes ?? null;
-  const totalMinutes = getMatchTotalMinutes({ officialTotalMinutes, strategy: "default" });
+  const clock = documentRes.data?.canonical_json?.match_meta?.clock ?? null;
+  const competitionName = matchRes.data?.competition_name ?? documentRes.data?.canonical_json?.match_meta?.competition_name ?? null;
+  const firstHalfDuration = clock?.first_half_duration ?? getHalfDurationByCompetition(competitionName);
+  const officialTotalMinutes = clock?.official_total_minutes ?? null;
+  const totalMinutes = getMatchTotalMinutes({
+    officialTotalMinutes,
+    matchDurationMinutes: matchRes.data?.match_duration_minutes ?? clock?.nominal_total_minutes ?? null,
+    competitionName,
+  });
 
   const players = new Map<string, PlayerAccumulator>();
   const aliases = new Map<string, string>();
@@ -422,8 +450,8 @@ export async function rebuildPlayerStats(
   }
 
   const orderedSubstitutions = [...substitutions].sort((a, b) => {
-    const left = toAbsoluteMinute({ half: a.half, minute: a.minute, rawPhase: a.raw_phase, totalMinutes });
-    const right = toAbsoluteMinute({ half: b.half, minute: b.minute, rawPhase: b.raw_phase, totalMinutes });
+    const left = toAbsoluteMinute({ half: a.half, minute: a.minute, rawPhase: a.raw_phase, firstHalfDuration, totalMinutes });
+    const right = toAbsoluteMinute({ half: b.half, minute: b.minute, rawPhase: b.raw_phase, firstHalfDuration, totalMinutes });
     return left - right;
   });
 
@@ -432,6 +460,7 @@ export async function rebuildPlayerStats(
       half: substitution.half,
       minute: substitution.minute,
       rawPhase: substitution.raw_phase,
+      firstHalfDuration,
       totalMinutes,
     });
 
@@ -470,7 +499,7 @@ export async function rebuildPlayerStats(
 
     ensureObservedParticipation(
       player,
-      toAbsoluteMinute({ half: goal.half, minute: goal.minute, totalMinutes }),
+      toAbsoluteMinute({ half: goal.half, minute: goal.minute, firstHalfDuration, totalMinutes }),
       totalMinutes,
       "goal"
     );
@@ -484,8 +513,8 @@ export async function rebuildPlayerStats(
   }
 
   const orderedCards = [...cards].sort((a, b) => {
-    const left = toAbsoluteMinute({ half: a.half, minute: a.minute, rawPhase: a.raw_phase, totalMinutes });
-    const right = toAbsoluteMinute({ half: b.half, minute: b.minute, rawPhase: b.raw_phase, totalMinutes });
+    const left = toAbsoluteMinute({ half: a.half, minute: a.minute, rawPhase: a.raw_phase, firstHalfDuration, totalMinutes });
+    const right = toAbsoluteMinute({ half: b.half, minute: b.minute, rawPhase: b.raw_phase, firstHalfDuration, totalMinutes });
     return left - right;
   });
 
@@ -503,6 +532,7 @@ export async function rebuildPlayerStats(
       half: card.half,
       minute: card.minute,
       rawPhase: card.raw_phase,
+      firstHalfDuration,
       totalMinutes,
     });
 
