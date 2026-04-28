@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { runRosterSync } from "@/lib/sync/runRoster";
+import { RUNNING_SYNC_ERROR } from "@/lib/sync/syncRun";
 
 function isAuthorized(request: Request) {
   const headerSecret = request.headers.get("x-cron-secret");
@@ -14,7 +15,8 @@ export async function GET(request: Request) {
   }
 
   try {
-    const { syncRun, summary } = await runRosterSync();
+    const competitionId = new URL(request.url).searchParams.get("competition_id");
+    const { syncRun, summary } = await runRosterSync({ competitionId });
     return NextResponse.json(
       {
         status: syncRun.status,
@@ -24,6 +26,6 @@ export async function GET(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected roster sync error.";
-    return NextResponse.json({ status: "ERROR", error: message }, { status: 500 });
+    return NextResponse.json({ status: "ERROR", error: message }, { status: message === RUNNING_SYNC_ERROR ? 409 : 500 });
   }
 }

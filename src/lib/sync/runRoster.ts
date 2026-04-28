@@ -1,6 +1,14 @@
 import { fetchEligibleAthletesWithDebug } from "@/lib/sync/fpf/roster";
 import { getSupabaseAdmin } from "@/lib/supabase/serverAdmin";
 import { extractCompetitionId, normalizeCompetitionUrlBase } from "@/lib/sync/fpf/url";
+import {
+  buildCompetitionSummary,
+  createSyncRun,
+  getSyncTimeoutMs,
+  markSyncRunError,
+  type SyncRunOptions,
+  withSyncTimeout,
+} from "@/lib/sync/syncRun";
 
 export type SyncRunRow = {
   id: string;
@@ -15,6 +23,7 @@ type CompetitionRow = {
   id: string;
   name: string;
   category?: string | null;
+  season_year: number;
   url_base: string | null;
   is_active: boolean;
 };
@@ -38,6 +47,16 @@ type ExistingAthleteRow = {
 
 export type RosterSyncSummary = {
   source: "FPF_ROSTER";
+  competition_id?: string | null;
+  competition_name?: string | null;
+  category?: string | null;
+  season_year?: number | null;
+  competitions?: Array<{
+    competition_id: string;
+    competition_name: string;
+    category: string | null;
+    season_year: number;
+  }>;
   comps_checked: number;
   rows_total: number;
   galo_rows: number;
@@ -45,34 +64,33 @@ export type RosterSyncSummary = {
   updated: number;
 };
 
-export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: RosterSyncSummary }> {
+export async function runRosterSync(options: SyncRunOptions = {}): Promise<{ syncRun: SyncRunRow; summary: RosterSyncSummary }> {
   const supabase = getSupabaseAdmin();
   let runId: string | null = null;
 
   try {
-    const { data: run, error: runError } = await supabase
-      .from("sync_runs")
-      .insert({ status: "RUNNING" })
-      .select("id")
-      .single<{ id: string }>();
+    runId = await createSyncRun(supabase);
 
-    if (runError || !run) {
-      throw new Error("Could not create sync run.");
-    }
-
-    runId = run.id;
-
-    const { data: competitions, error: competitionsError } = await supabase
+    let competitionsQuery = supabase
       .from("competitions_registry")
-      .select("id,name,category,url_base,is_active")
+      .select("id,name,category,season_year,url_base,is_active")
       .eq("is_active", true)
       .order("season_year", { ascending: false });
+
+    if (options.competitionId) {
+      competitionsQuery = competitionsQuery.eq("id", options.competitionId);
+    }
+
+    const { data: competitions, error: competitionsError } = await competitionsQuery;
 
     if (competitionsError) {
       throw new Error(competitionsError.message);
     }
 
     const activeCompetitions = (competitions as CompetitionRow[]) ?? [];
+    if (options.competitionId && activeCompetitions.length === 0) {
+      throw new Error("Competição ativa não encontrada para sincronização.");
+    }
 
     let compsChecked = 0;
     let imported = 0;
@@ -80,17 +98,38 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
     let rowsTotal = 0;
     let galoRows = 0;
 
-    const { error: prePassError } = await supabase
-      .from("athletes")
-      .update({ is_active_fpf: false })
-      .eq("source", "FPF")
-      .eq("club_name", "GALO MARINGA");
+    const summary = await withSyncTimeout(async () => {
+      if (options.competitionId) {
+        const competitionIds = activeCompetitions
+          .map((competition) => normalizeCompetitionUrlBase(competition.url_base, competition.category))
+          .map((urlBase) => (urlBase ? extractCompetitionId(urlBase) : null))
+          .filter((competitionId): competitionId is string => !!competitionId);
 
-    if (prePassError) {
-      throw new Error(prePassError.message);
-    }
+        if (competitionIds.length > 0) {
+          const { error: prePassError } = await supabase
+            .from("athletes")
+            .update({ is_active_fpf: false })
+            .eq("source", "FPF")
+            .eq("club_name", "GALO MARINGA")
+            .in("fpf_competition_id", competitionIds);
 
-    for (const competition of activeCompetitions) {
+          if (prePassError) {
+            throw new Error(prePassError.message);
+          }
+        }
+      } else {
+        const { error: prePassError } = await supabase
+          .from("athletes")
+          .update({ is_active_fpf: false })
+          .eq("source", "FPF")
+          .eq("club_name", "GALO MARINGA");
+
+        if (prePassError) {
+          throw new Error(prePassError.message);
+        }
+      }
+
+      for (const competition of activeCompetitions) {
       const competitionUrlBase = normalizeCompetitionUrlBase(competition.url_base, competition.category);
       if (!competitionUrlBase) continue;
       compsChecked += 1;
@@ -162,16 +201,18 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
 
       updated += existingSet.size;
       imported += newRows.length;
-    }
+      }
 
-    const summary: RosterSyncSummary = {
-      source: "FPF_ROSTER",
-      comps_checked: compsChecked,
-      rows_total: rowsTotal,
-      galo_rows: galoRows,
-      imported,
-      updated,
-    };
+      return {
+        source: "FPF_ROSTER" as const,
+        ...buildCompetitionSummary(options.competitionId, activeCompetitions),
+        comps_checked: compsChecked,
+        rows_total: rowsTotal,
+        galo_rows: galoRows,
+        imported,
+        updated,
+      };
+    }, getSyncTimeoutMs(options), "Sync de elenco FPF");
 
     const { data: doneRun, error: doneError } = await supabase
       .from("sync_runs")
@@ -197,14 +238,7 @@ export async function runRosterSync(): Promise<{ syncRun: SyncRunRow; summary: R
     const message = error instanceof Error ? error.message : "Unexpected roster sync error.";
 
     if (runId) {
-      await supabase
-        .from("sync_runs")
-        .update({
-          status: "ERROR",
-          finished_at: new Date().toISOString(),
-          error_text: message,
-        })
-        .eq("id", runId);
+      await markSyncRunError(supabase, runId, message);
     }
 
     throw new Error(message);
